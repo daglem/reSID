@@ -21,15 +21,15 @@ The first tests of reSID were run on this file.
 With an exceptional memory of Commodore 64 tunes Lars Haugseth has pointed
 out several errors in reSID that are now corrected.
 
-Morten Rollan and Kåre Gunnar Nesheim have provided interesting discussions
-regarding audio filters.
+Morten Rollan and Kåre Gunnar Nesheim have provided interesting and insightful
+information regarding digital filters.
 
 VICE has been an inspiration for this project, and testing of reSID has
 been greatly simplified by VICEs -sounddev dump option. Teemu Rantanen
-has written support for reSID in the forthcoming version of VICE, making it
-possible to choose at runtime between his excellent SID emulation and, given
-enough CPU power, the reSID emulator engine. The VICE home page is found at:
-http://www.tu-chemnitz.de/~fachat/vice/vice.html
+has written support for reSID in VICE, making it possible to choose at runtime
+between his excellent SID emulation and, given enough CPU power, the reSID
+emulator engine. The VICE home page is found at:
+http://www.tu-chemnitz.de/~fachat/vice/
 
 The author of SIDPLAY, Michael Schwendt, has implemented a patch to link
 libsidplay with reSID. Using his excellent tune player he has pointed out
@@ -37,7 +37,10 @@ several bugs in reSID. He has also provided invaluable information related to
 the bugs as basis for further investigation. Most notably, the infamous ADSR
 delay bug, of which I was previously unaware, has finally been understood and
 is now correctly implemented in reSID. The SIDPLAY home page is found at:
-http://www.geocities.com/SiliconValley/Lakes/5147/sidplay.html
+http://www.geocities.com/SiliconValley/Lakes/5147/
+
+A bug report from Daniel Lacasse led to the discovery of a previously unknown
+SID bug, the ADSR boundary bug.
 
 Finally I would like to thank my business partner Stian W. Arnesen for
 putting up with all this nonsense.

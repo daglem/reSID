@@ -1,3 +1,24 @@
+Changes in reSID version 0.3
+----------------------------
+
+The reSID library has changed name from libmos6581.a to libresid.a
+
+The pulse+sawtooth combined waveform has been corrected.
+
+Pulse+test bit samples are implemented.
+
+The envelope rate periods have finally been exactly determined.
+
+A new SID bug, the ADSR boundary bug, has been discovered and implemented.
+This bug makes it possible to step from envelope level 0x00 to 0xff or from
+0xff to 0x00 in one step.
+
+One-cycle optimized overloads of the clock() functions have been implemented
+to facilitate sampling at 1MHz.
+
+The code has been further optimized for speed.
+
+
 Changes in reSID version 0.2
 ----------------------------
 

@@ -46,6 +46,8 @@ void EnvelopeGenerator::reset()
   exponential_counter = 0;
 
   state = RELEASE;
+  rate_period = rate_counter_period[release];
+  hold_zero = true;
 }
 
 
@@ -66,16 +68,32 @@ void EnvelopeGenerator::reset()
 // as rate counter comparison values, not considering a one cycle delay to
 // zero the counter. This would yield an actual period of comparison value + 1.
 //
-// The exact rate counter period must be determined using a REU
-// (RAM Expansion Unit) DMA to sample ENV3 every cycle. Making a full sample
-// from 8 cycle shifted samples is not sufficient for exact values, since
-// it is not possible to reset the rate counter. This means that is is not
-// possible to exactly control the time of the first count of the envelope
-// counter.
+// The exact rate counter periods can be determined e.g. by counting the number
+// of cycles from envelope level 1 to envelope level 255, and dividing the
+// number of cycles by 254. CIA1 timer A and B in linked mode can perform
+// the cycle count. This is the method used to find the rates below.
+// Making a sample from 8 cycle shifted samples is not sufficient for exact
+// values, since it is not possible to reset the rate counter (the test bit
+// has no influence on the envelope generator whatsoever). This means that the
+// time of the first count of the envelope counter can not be exactly
+// controlled except possibly by resetting the chip.
 //
-// NB! To avoid the ADSR delay bug, sampling of ENV3 should be done using
+// To avoid the ADSR delay bug, sampling of ENV3 should be done using
 // sustain = release = 0. This ensures that the attack state will not lower
-// the current rate counter period.
+// the current rate counter period. The maximum error from the SID chip is now
+// 9 cycles. The code below adds a maximum error of 18 cycles:
+//
+// l1: lda $d41c
+//     cmp #$01
+//     bne l1
+//     ...
+// l2: lda $d41c
+//     cmp #$ff
+//     bne l2
+//
+// The maximum timing error is thus 27 cycles, which yields a maximum error
+// for the calculated rate period of 27/254 cycles. The described method is
+// thus sufficient for exact calculation of rate periods.
 //
 reg16 EnvelopeGenerator::rate_counter_period[] = {
       9,  //   2ms*1.0MHz/256 =     7.81
@@ -90,74 +108,58 @@ reg16 EnvelopeGenerator::rate_counter_period[] = {
     977,  // 250ms*1.0MHz/256 =   976.56
    1954,  // 500ms*1.0MHz/256 =  1953.13
    3126,  // 800ms*1.0MHz/256 =  3125.00
-   3906,  //   1 s*1.0MHz/256 =  3906.25
+   3907,  //   1 s*1.0MHz/256 =  3906.25
   11720,  //   3 s*1.0MHz/256 = 11718.75
   19532,  //   5 s*1.0MHz/256 = 19531.25
-  31252   //   8 s*1.0MHz/256 = 31250.00
+  31251   //   8 s*1.0MHz/256 = 31250.00
 };
+
 
 // For decay and release, the clock to the envelope counter is sequentially
 // divided by 1, 2, 4, 8, 16, 30 to create a piece-wise linear approximation
 // of an exponential at the envelope counter values 93, 54, 26, 14, 6.
-// This has been verified by sampling ENV3.
+// As a special case the period at zero level is 1; this only influences the
+// ADSR boundary bug.
+// All values have been verified by sampling ENV3.
 //
-reg8 EnvelopeGenerator::exponential_counter_level[] = {
-  0x5d,
-  0x36,
-  0x1a,
-  0x0e,
-  0x06,
-  0x00
-};
-
-// Lookup table to directly, from the envelope counter, find the line
-// segment number of the approximation of an exponential.
-//
-reg8 EnvelopeGenerator::exponential_counter_segment[] = {
-  /* 0x00: */  5, 5, 5, 5, 5, 5, 5, 4,  // 0x06
-  /* 0x08: */  4, 4, 4, 4, 4, 4, 4, 3,  // 0x0e
-  /* 0x10: */  3, 3, 3, 3, 3, 3, 3, 3,
-  /* 0x18: */  3, 3, 3, 2, 2, 2, 2, 2,  // 0x1a
-  /* 0x20: */  2, 2, 2, 2, 2, 2, 2, 2,
-  /* 0x28: */  2, 2, 2, 2, 2, 2, 2, 2,
-  /* 0x30: */  2, 2, 2, 2, 2, 2, 2, 1,  // 0x36
-  /* 0x38: */  1, 1, 1, 1, 1, 1, 1, 1,
-  /* 0x40: */  1, 1, 1, 1, 1, 1, 1, 1,
-  /* 0x48: */  1, 1, 1, 1, 1, 1, 1, 1,
-  /* 0x50: */  1, 1, 1, 1, 1, 1, 1, 1,
-  /* 0x58: */  1, 1, 1, 1, 1, 1, 0, 0,  // 0x5d
-  /* 0x60: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x68: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x70: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x78: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x80: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x88: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x90: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0x98: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xa0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xa8: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xb0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xb8: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xc0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xc8: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xd0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xd8: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xe0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xe8: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xf0: */  0, 0, 0, 0, 0, 0, 0, 0,
-  /* 0xf8: */  0, 0, 0, 0, 0, 0, 0, 0
-};
-
-// Table to convert from line segment number to actual counter period.
+// Lookup table to directly, from the envelope counter, find the current
+// exponential counter period.
 //
 reg8 EnvelopeGenerator::exponential_counter_period[] = {
-  1,
-  2,
-  4,
-  8,
-  16,
-  30
+  /* 0x00: */   1, 30, 30, 30, 30, 30, 30, 16,  // 0x06
+  /* 0x08: */  16, 16, 16, 16, 16, 16, 16,  8,  // 0x0e
+  /* 0x10: */   8,  8,  8,  8,  8,  8,  8,  8,
+  /* 0x18: */   8,  8,  8,  4,  4,  4,  4,  4,  // 0x1a
+  /* 0x20: */   4,  4,  4,  4,  4,  4,  4,  4,
+  /* 0x28: */   4,  4,  4,  4,  4,  4,  4,  4,
+  /* 0x30: */   4,  4,  4,  4,  4,  4,  4,  2,  // 0x36
+  /* 0x38: */   2,  2,  2,  2,  2,  2,  2,  2,
+  /* 0x40: */   2,  2,  2,  2,  2,  2,  2,  2,
+  /* 0x48: */   2,  2,  2,  2,  2,  2,  2,  2,
+  /* 0x50: */   2,  2,  2,  2,  2,  2,  2,  2,
+  /* 0x58: */   2,  2,  2,  2,  2,  2,  1,  1,  // 0x5d
+  /* 0x60: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x68: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x70: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x78: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x80: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x88: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x90: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0x98: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xa0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xa8: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xb0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xb8: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xc0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xc8: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xd0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xd8: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xe0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xe8: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xf0: */   1,  1,  1,  1,  1,  1,  1,  1,
+  /* 0xf8: */   1,  1,  1,  1,  1,  1,  1,  1
 };
+
 
 // From the sustain levels it follows that both the low and high 4 bits of the
 // envelope counter are compared to the 4-bit sustain value.
@@ -190,19 +192,21 @@ void EnvelopeGenerator::writeCONTROL_REG(reg8 control)
 {
   bool gate_next = control & 0x01;
 
-  // Flipping the gate bit resets the exponential counter, however the rate
-  // counter is not reset. Thus there will be a delay before the envelope
-  // counter starts counting up (attack) or down (release).
+  // The rate counter is never reset, thus there will be a delay before the
+  // envelope counter starts counting up (attack) or down (release).
 
   // Gate bit on: Start attack, decay, sustain.
   if (!gate && gate_next) {
     state = ATTACK;
-    exponential_counter = 0;
+    rate_period = rate_counter_period[attack];
+
+    // Switching to attack state unlocks the zero freeze.
+    hold_zero = false;
   }
   // Gate bit off: Start release.
   else if (gate && !gate_next) {
     state = RELEASE;
-    exponential_counter = 0;
+    rate_period = rate_counter_period[release];
   }
 
   gate = gate_next;
@@ -212,12 +216,21 @@ void EnvelopeGenerator::writeATTACK_DECAY(reg8 attack_decay)
 {
   attack = (attack_decay >> 4) & 0x0f;
   decay = attack_decay & 0x0f;
+  if (state == ATTACK) {
+    rate_period = rate_counter_period[attack];
+  }
+  else if (state == DECAY_SUSTAIN) {
+    rate_period = rate_counter_period[decay];
+  }
 }
 
 void EnvelopeGenerator::writeSUSTAIN_RELEASE(reg8 sustain_release)
 {
   sustain = (sustain_release >> 4) & 0x0f;
   release = sustain_release & 0x0f;
+  if (state == RELEASE) {
+    rate_period = rate_counter_period[release];
+  }
 }
 
 reg8 EnvelopeGenerator::readENV()

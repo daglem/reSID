@@ -3,15 +3,15 @@ This is reSID, a reverse engineered software emulation of the MOS6581 SID
 
 reSID is free software. See the file COPYING for copying permission.
 
-reSID contains a C++ library containing a complete emulation of the SID chip.
+reSID is a C++ library containing a complete emulation of the SID chip.
 This library can be linked into programs emulating the MOS6510 MPU to
 play music made for the Commodore 64 computer. reSID has been successfully
 linked into VICE, a full-fledged Commodore 64 emulator, and SIDPLAY, a
-popular SID tune player. A patch for VICE 0.14.2 is included in this
-package. The VICE home page is:
-http://www.tu-chemnitz.de/~fachat/vice/vice.html
+popular SID tune player. A patch for VICE 0.14.2 is included in this package.
+The VICE home page is:
+http://www.tu-chemnitz.de/~fachat/vice/
 A patch for SIDPLAY can be found on the SIDPLAY home page:
-http://www.geocities.com/SiliconValley/Lakes/5147/sidplay.html
+http://www.geocities.com/SiliconValley/Lakes/5147/
 
 Various SID emulators exist, however reSID should still be of great
 interest to Commodore 64 nostalgics. The emulator engine is cycle-based,

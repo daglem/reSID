@@ -2,10 +2,9 @@ To patch VICE to use reSID for sound in x64, do the following:
 
 1. Install reSID (see the resid INSTALL file for instructions)
 2. Unpack vice-0.14.2.tar.gz
-3. Apply the supplied patch using GNU patch,
-   e.g. if vice-0.14.2 and resid-0.1 are both located in /usr/tmp
-     cd /usr/tmp
-     patch -p0 < resid-0.1/vice/vice-0.14.2-resid.diff
+3. Apply the supplied patch using GNU patch, e.g.
+     cd vice-0.14.2
+     patch -p1 < ../resid-0.3/vice/vice-0.14.2-resid.diff
 4. Configure VICE with the --with-resid option
      ./configure --with-resid
 5. Make and install VICE

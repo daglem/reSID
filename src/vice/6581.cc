@@ -124,7 +124,7 @@ static void init_sid(sound_t *psid, s16_t *pbuf, int speed)
     else
 	warn_reset(psid->pwarn);
 
-    sid.bypass_filter(!app_resources.sidFilters);
+    sid.enable_filter(app_resources.sidFilters);
     psid->newsid = app_resources.sidModel;
 }
 

@@ -1,4 +1,9 @@
-This is a patch for VICE to use reSID for sound in x64.
+This is a patch for VICE 0.14.2 to use reSID for sound in x64.
+VICE 0.15 has support for reSID, however the SID writes are not cycle exact
+(yet) to avoid the annoying frequency variations in the patch for VICE 0.14.2.
+Until this is fixed VICE 0.14.2 is still the reference test environment for
+reSID. If possible please double check any SID tune in VICE 0.14.2 before
+submitting a bug report on reSID.
 
 Note:
 1. A processor comparable in speed to a Pentium II is needed for this.

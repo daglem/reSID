@@ -27,8 +27,18 @@
 Filter::Filter()
 {
   reset();
-  bypass = false;
+  enabled = true;
 }
+
+
+// ----------------------------------------------------------------------------
+// Enable filter.
+// ----------------------------------------------------------------------------
+void Filter::enable_filter(bool enable)
+{
+  enabled = enable;
+}
+
 
 // ----------------------------------------------------------------------------
 // SID reset.
@@ -100,6 +110,13 @@ void Filter::writeMODE_VOL(reg8 mode_vol)
   vol = mode_vol & 0x0f;
 }
 
+
+// Non-POSIX copysign function.
+inline double Filter::copysign(double x, double y)
+{
+  return x < 0 ? (y < 0 ? x : -x) : (y >= 0 ? x : -x);
+}
+
 // Set filter cutoff frequency.
 void Filter::set_w0()
 {
@@ -116,7 +133,7 @@ void Filter::set_w0()
   double w0 =
     228 + 3900/2*(1 + tanh(copysign(pow(fabs(x), 0.85)/95, x)));
 
-  _2_pi_w0 = sound_sample(2*M_PI*w0);
+  _2_pi_w0 = sound_sample(2*M_PI*w0*1.048576);
 }
 
 // Set filter resonance.
@@ -128,6 +145,6 @@ void Filter::set_Q()
   // As resonance is increased, the filter must be clocked more often to keep
   // stable.
   // NB! To avoid even higher demands on the CPU, Q is limited to 1.3.
-  // _1000_Q = 707 + 1000*res/0x0f;
-  _1000_Q = 707 + 600*res/0x0f;
+  // Q = 0.707 + 1.0*res/0x0f;
+  _1024_div_Q = sound_sample(1024.0/(0.707 + 0.6*res/0x0f));
 }

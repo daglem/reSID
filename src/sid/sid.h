@@ -29,20 +29,22 @@ class SID
 {
 public:
   SID();
+
+  void set_chip_model(chip_model model);
+  void enable_filter(bool enable);
+
+  void clock();
   void clock(cycle_count delta_t);
   void reset();
   
-  // 16-bit output.
-  int output();
-  // n-bit output.
-  int output(int bits);
-
   // Read/write registers.
   reg8 read(reg8 offset);
   void write(reg8 offset, reg8 value);
 
-  // Bypass filter.
-  void bypass_filter(bool bypass);
+  // 16-bit output.
+  int output();
+  // n-bit output.
+  int output(int bits);
 
 protected:
   Voice voice1;
@@ -52,7 +54,6 @@ protected:
   Potentiometer potx;
   Potentiometer poty;
 
-private:
   reg8 bus_value;
   Voice* voice[3];
 };

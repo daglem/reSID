@@ -1,6 +1,6 @@
 diff -ruN vice-0.14.2/src/6581.cc vice-0.14.2-resid/src/6581.cc
 --- vice-0.14.2/src/6581.cc	Thu Jan  1 01:00:00 1970
-+++ vice-0.14.2-resid/src/6581.cc	Mon Jul 27 00:57:19 1998
++++ vice-0.14.2-resid/src/6581.cc	Sat Aug 22 17:48:36 1998
 @@ -0,0 +1,1792 @@
 +/*
 + * 6581.cc - MOS6581 (SID) emulation.
@@ -128,7 +128,7 @@ diff -ruN vice-0.14.2/src/6581.cc vice-0.14.2-resid/src/6581.cc
 +    else
 +	warn_reset(psid->pwarn);
 +
-+    sid.bypass_filter(!app_resources.sidFilters);
++    sid.enable_filter(app_resources.sidFilters);
 +    psid->newsid = app_resources.sidModel;
 +}
 +
@@ -1796,7 +1796,7 @@ diff -ruN vice-0.14.2/src/6581.cc vice-0.14.2-resid/src/6581.cc
 +} // extern "C"
 diff -ruN vice-0.14.2/src/Makefile.in vice-0.14.2-resid/src/Makefile.in
 --- vice-0.14.2/src/Makefile.in	Sun Mar 29 21:22:20 1998
-+++ vice-0.14.2-resid/src/Makefile.in	Mon Jul 27 01:02:03 1998
++++ vice-0.14.2-resid/src/Makefile.in	Sat Aug 22 17:48:37 1998
 @@ -283,8 +283,12 @@
  
  PARALLEL_OBJS = parallel.o
@@ -1843,7 +1843,7 @@ diff -ruN vice-0.14.2/src/Makefile.in vice-0.14.2-resid/src/Makefile.in
  	$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -o $@ -c $(SRCDIR)/$(@:.o=.c)
 diff -ruN vice-0.14.2/src/configure vice-0.14.2-resid/src/configure
 --- vice-0.14.2/src/configure	Wed Mar 11 21:59:28 1998
-+++ vice-0.14.2-resid/src/configure	Mon Jul 27 01:02:03 1998
++++ vice-0.14.2-resid/src/configure	Sat Aug 22 17:48:37 1998
 @@ -22,6 +22,8 @@
  ac_help="$ac_help
    --disable-textfield     disable enhanced text field widget"
@@ -1888,7 +1888,7 @@ diff -ruN vice-0.14.2/src/configure vice-0.14.2-resid/src/configure
 +if test "$with_resid" = yes; then
 +  SID_OBJ=
 +  RESID_OBJ="6581.o"
-+  RESID_LIB="-lmos6581"
++  RESID_LIB="-lresid"
 +else
 +  SID_OBJ="sid.o"
 +  RESID_OBJ=
@@ -3885,7 +3885,7 @@ diff -ruN vice-0.14.2/src/configure vice-0.14.2-resid/src/configure
  s%@RANLIB@%$RANLIB%g
 diff -ruN vice-0.14.2/src/configure.in vice-0.14.2-resid/src/configure.in
 --- vice-0.14.2/src/configure.in	Wed Mar 11 21:59:28 1998
-+++ vice-0.14.2-resid/src/configure.in	Mon Jul 27 01:02:03 1998
++++ vice-0.14.2-resid/src/configure.in	Sat Aug 22 17:48:37 1998
 @@ -22,7 +22,8 @@
  AC_ARG_ENABLE(16bpp,[  --enable-16bpp          enable 16-bit only display depth support])
  AC_ARG_ENABLE(24bpp,[  --enable-24bpp          enable 24-bit only display depth support])
@@ -3904,7 +3904,7 @@ diff -ruN vice-0.14.2/src/configure.in vice-0.14.2-resid/src/configure.in
 +if test "$with_resid" = yes; then
 +  SID_OBJ=
 +  RESID_OBJ="6581.o"
-+  RESID_LIB="-lmos6581"
++  RESID_LIB="-lresid"
 +else
 +  SID_OBJ="sid.o"
 +  RESID_OBJ=

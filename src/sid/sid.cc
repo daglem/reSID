@@ -30,6 +30,18 @@ SID::SID()
   voice[2] = &voice3;
 }
 
+
+// ----------------------------------------------------------------------------
+// Set chip model.
+// ----------------------------------------------------------------------------
+void SID::set_chip_model(chip_model model)
+{
+  for (int i = 0; i < 3; i++) {
+    voice[i]->wave.set_chip_model(model);
+  }
+}
+
+
 // ----------------------------------------------------------------------------
 // SID reset.
 // ----------------------------------------------------------------------------
@@ -185,43 +197,63 @@ void SID::write(reg8 offset, reg8 value)
 
 
 // ----------------------------------------------------------------------------
-// Bypass filter.
+// Enable filter.
 // ----------------------------------------------------------------------------
-void SID::bypass_filter(bool bypass)
+void SID::enable_filter(bool enable)
 {
-  filter.bypass = bypass;
+  filter.enable_filter(enable);
 }
 
 
 // ----------------------------------------------------------------------------
-// SID clocking.
+// SID clocking - 1 cycle.
+// ----------------------------------------------------------------------------
+void SID::clock()
+{
+  int i;
+
+  // Clock amplitude modulators.
+  for (i = 0; i < 3; i++) {
+    voice[i]->envelope.clock();
+  }
+
+  // Clock oscillators.
+  for (i = 0; i < 3; i++) {
+    voice[i]->wave.clock();
+  }
+
+  // Synchronize oscillators.
+  for (i = 0; i < 3; i++) {
+    voice[i]->wave.synchronize();
+  }
+
+  // Clock filter.
+  filter.clock(voice1.output(), voice2.output(), voice3.output());
+}
+
+
+// ----------------------------------------------------------------------------
+// SID clocking - delta_t cycles.
 // ----------------------------------------------------------------------------
 void SID::clock(cycle_count delta_t)
 {
   int i;
 
-  if (!delta_t) {
+  if (delta_t <= 0) {
     return;
   }
 
   // Clock filter.
 
-  cycle_count delta_t_flt;
-
-  // Bypass filter on/off.
+  // Enable filter on/off.
   // This is not really part of SID, but is useful for testing.
   // On slow CPU's it may be necessary to bypass the filter to lower the CPU
   // load.
-  if (filter.bypass) {
-    delta_t_flt = delta_t;
-  }
-  else {
-    // Maximum delta cycles for filter to work satisfactorily under current
-    // cutoff frequency and resonance constraints is approximately 8.
-    delta_t_flt = 8;
-  }
+  // Maximum delta cycles for filter to work satisfactorily under current
+  // cutoff frequency and resonance constraints is approximately 8.
+  cycle_count delta_t_flt = filter.enabled ? 8 : delta_t;
 
-  while (delta_t > 0) {
+  while (delta_t) {
     if (delta_t < delta_t_flt) {
       delta_t_flt = delta_t;
     }
@@ -234,7 +266,7 @@ void SID::clock(cycle_count delta_t)
     // Clock and synchronize oscillators.
     // Loop until we reach the current cycle.
     cycle_count delta_t_osc = delta_t_flt;
-    while (delta_t_osc > 0) {
+    while (delta_t_osc) {
       cycle_count delta_t_min = delta_t_osc;
 
       // Find minimum number of cycles to an oscillator accumulator MSB toggle.
@@ -280,6 +312,7 @@ void SID::clock(cycle_count delta_t)
       delta_t_osc -= delta_t_min;
     }
 
+    // Clock filter.
     filter.clock(delta_t_flt,
 		 voice1.output(), voice2.output(), voice3.output());
 

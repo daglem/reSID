@@ -27,8 +27,34 @@ WaveformGenerator::WaveformGenerator(WaveformGenerator* source)
 {
   sync_source = source;
   source->sync_dest = this;
+
+  set_chip_model(MOS6581);
+
   reset();
 }
+
+
+// ----------------------------------------------------------------------------
+// Set chip model.
+// ----------------------------------------------------------------------------
+void WaveformGenerator::set_chip_model(chip_model model)
+{
+  if (model == MOS6581) {
+    wave__ST = wave6581__ST;
+    wave_P_T = wave6581_P_T;
+    wave_PS_ = wave6581_PS_;
+    wave_PST = wave6581_PST;
+  }
+#if 0
+  else {
+    wave__ST = wave8580__ST;
+    wave_P_T = wave8580_P_T;
+    wave_PS_ = wave8580_PS_;
+    wave_PST = wave8580_PST;
+  }
+#endif
+}
+
 
 // ----------------------------------------------------------------------------
 // Register functions.
@@ -90,7 +116,7 @@ void WaveformGenerator::writeCONTROL_REG(reg8 control)
 
 reg8 WaveformGenerator::readOSC()
 {
-  return (this->*output_function[waveform])() >> 4;
+  return output() >> 4;
 }
 
 // ----------------------------------------------------------------------------
@@ -109,235 +135,3 @@ void WaveformGenerator::reset()
 
   msb_rising = false;
 }
-
-
-// ----------------------------------------------------------------------------
-// Output functions.
-// ----------------------------------------------------------------------------
-
-// No waveform:
-// No output.
-//
-reg12 WaveformGenerator::output____()
-{
-  return 0;
-}
-
-// Triangle:
-// The upper 12 bits of the accumulator are used.
-// The MSB is used to create the falling edge of the triangle by inverting
-// the lower 11 bits. The MSB is thrown away and the lower 11 bits are
-// left-shifted (half the resolution, full amplitude).
-// Ring modulation substitutes the MSB with MSB EOR sync_source MSB.
-//
-reg12 WaveformGenerator::output___T()
-{
-  bool msb = (ring_mod ? accumulator ^ sync_source->accumulator : accumulator)
-    & 0x800000;
-  return ((msb ? ~accumulator : accumulator) >> 11) & 0xfff;
-}
-
-// Sawtooth:
-// The output is identical to the upper 12 bits of the accumulator.
-//
-reg12 WaveformGenerator::output__S_()
-{
-  return accumulator >> 12;
-}
-
-// Pulse:
-// The upper 12 bits of the accumulator are used.
-// These bits are compared to the pulse width register by a 12 bit digital
-// comparator; output is either all one or all zero bits.
-// NB! The output is actually delayed one cycle after the compare.
-// This is not modeled.
-//
-reg12 WaveformGenerator::output_P__()
-{
-  return (accumulator >> 12) >= pw ? 0xfff : 0x000;
-}
-
-// Noise:
-// The noise output is taken from intermediate bits of a 23-bit shift register
-// which is clocked by bit 19 of the accumulator.
-// NB! The output is actually delayed 2 cycles after bit 19 is set high.
-// This is not modeled.
-//
-// Operation: Calculate EOR result, shift register, set bit 0 = result.
-//
-//                        ----------------------->---------------------
-//                        |                                            |
-//                   ----EOR----                                       |
-//                   |         |                                       |
-//                   2 2 2 1 1 1 1 1 1 1 1 1 1                         |
-// Register bits:    2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 <---
-//                   |   |       |     |   |       |     |   |
-// OSC3 bits  :      7   6       5     4   3       2     1   0
-//
-// Since waveform output is 12 bits the output is left-shifted 4 times.
-//
-reg12 WaveformGenerator::outputN___()
-{
-  return
-    ((shift_register & 0x400000) >> 11) |
-    ((shift_register & 0x100000) >> 10) |
-    ((shift_register & 0x010000) >> 7) |
-    ((shift_register & 0x002000) >> 5) |
-    ((shift_register & 0x000800) >> 4) |
-    ((shift_register & 0x000080) >> 1) |
-    ((shift_register & 0x000010) << 1) |
-    ((shift_register & 0x000004) << 2);
-}
-
-// Combined waveforms:
-// By combining waveforms the output bits of each waveform are
-// effectively short circuited. A zero bit in one waveform will draw
-// the corresponding bit in the other waveform(s) to zero (thus the
-// infamous claim that the waveforms are AND'ed).
-// However, zero bits will also affect other bits since each waveform
-// is actually connected via transistors to a register holding the upper 12
-// bits of the accumulator.
-//
-// Example:
-// Triangle is basically sawtooth left-shifted. This means that e.g.
-// triangle bit 3 is connected to sawtooth bit 2 via transistors
-// (think of this connection as a resistor). By short-circuiting
-// triangle bit 3 with sawtooth bit 3 in the figure below, triangle
-// bit 3 will be drawn to zero, and in this case there is enough power
-// left to draw bit 4 to zero as well (note that all bits are connected!).
-// 
-//             1 1
-//             1 0 9 8 7 6 5 4 3 2 1 0
-//             -----------------------
-// Sawtooth    0 0 0 1 1 1 1 1 1 0 0 0
-//              / / / / / / / / / / /
-//             / / / / / / / / / / /
-// Triangle    0 0 1 1 1 1 1 1 0 0 0 0
-//
-// AND         0 0 0 1 1 1 1 1 0 0 0 0
-//
-// Output      0 0 0 0 1 1 1 0 0 0 0 0
-//
-//
-// This behavior would be quite difficult to model exactly, since the SID
-// in this case does not really act as a digital state machine.
-// Tests show that minor (1 bit)  differences can actually occur in the
-// output from otherwise identical samples from OSC3 when waveforms are
-// combined.
-//
-// It is probably possible to come up with a valid model for the
-// behavior, however this would be far too slow for practical use since it
-// would have to be based on the mutual influence of individual bits.
-//
-// The output is instead approximated by using the upper bits of the
-// accumulator as an index to look up the combined output in a table
-// containing actual combined waveform samples from OSC3.
-// These samples are 8 bit, so we lose the lower 4 bits of waveform output.
-//
-// Experiments show that the MSB of the accumulator and its effect of
-// negating accumulator bits for triangle output has no effect on
-// combined waveforms including triangle. This is fortunate since it allows
-// direct table lookup without having to consider ring modulation.
-//
-// Pulse+Sawtooth:
-// The upper 12 bits of the accumulator is used to look up an OSC3
-// sample. This sample is output if pulse output is on.
-// OSC3 samples are taken with FREQ=0x1000;
-//
-// Sawtooth+Triangle:
-// The accumulator is left-shifted, and the resulting upper 12 bits of the
-// accumulator is used to look up an OSC3 sample.
-// OSC3 samples are taken with FREQ=0x0800;
-// 
-// Pulse+Triangle, Pulse+Sawtooth+Triangle:
-// The accumulator is left-shifted, and the resulting upper 12 bits of the
-// accumulator is used to look up an OSC3 sample. This sample is output if
-// pulse output is on, otherwise zero is output.
-// OSC3 samples are taken with FREQ=0x0800;
-// 
-reg12 WaveformGenerator::output_PS_()
-{
-  return (sample_PS_[accumulator >> 12] << 4) & output_P__();
-}
-
-reg12 WaveformGenerator::output__ST()
-{
-  return sample__ST[(accumulator >> 11) & 0xfff] << 4;
-}
-
-reg12 WaveformGenerator::output_P_T()
-{
-  return (sample_P_T[(accumulator >> 11) & 0xfff] << 4) & output_P__();
-}
-
-reg12 WaveformGenerator::output_PST()
-{
-  return (sample_PST[(accumulator >> 11) & 0xfff] << 4) & output_P__();
-}
-
-// Combined waveforms including noise:
-// All waveform combinations including noise output zero after a few cycles.
-// NB! The effects such combinations are not fully explored. It is claimed
-// that the shift register may be filled with zeroes and locked up, which
-// seems to be true.
-// We have not attempted to model this behavior, suffice to say that
-// there is very little audible output from waveform combinations including
-// noise. We hope that nobody is actually using it.
-//
-reg12 WaveformGenerator::outputN__T()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputN_S_()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputN_ST()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputNP__()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputNP_T()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputNPS_()
-{
-  return 0;
-}
-
-reg12 WaveformGenerator::outputNPST()
-{
-  return 0;
-}
-
-
-// Array of functions to return waveform output.
-//
-WaveformGenerator::OutputFunction WaveformGenerator::output_function[] =
-{
-  &WaveformGenerator::output____,
-  &WaveformGenerator::output___T,
-  &WaveformGenerator::output__S_,
-  &WaveformGenerator::output__ST,
-  &WaveformGenerator::output_P__,
-  &WaveformGenerator::output_P_T,
-  &WaveformGenerator::output_PS_,
-  &WaveformGenerator::output_PST,
-  &WaveformGenerator::outputN___,
-  &WaveformGenerator::outputN__T,
-  &WaveformGenerator::outputN_S_,
-  &WaveformGenerator::outputN_ST,
-  &WaveformGenerator::outputNP__,
-  &WaveformGenerator::outputNP_T,
-  &WaveformGenerator::outputNPS_,
-  &WaveformGenerator::outputNPST
-};

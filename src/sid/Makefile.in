@@ -57,17 +57,19 @@ RANLIB = @RANLIB@
 RESID_INLINE = @RESID_INLINE@
 VERSION = @VERSION@
 
-lib_LIBRARIES = libmos6581.a
+lib_LIBRARIES = libresid.a
 
-libmos6581_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc pot.cc sample_PST.cc sample_PS_.cc sample_P_T.cc sample__ST.cc
+libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc pot.cc $(noinst_DATA:.dat=.cc)
 
 pkginclude_HEADERS = siddefs.h sid.h voice.h wave.h envelope.h filter.h pot.h
 
-noinst_DATA = data/sample_PST.freq0800 data/sample_PS_.freq1000 data/sample_P_T.freq0800 data/sample__ST.freq0800
+noinst_DATA = wave6581_PST.dat wave6581_PS_.dat wave6581_P_T.dat wave6581__ST.dat
 
 noinst_SCRIPTS = samp2src.pl
 
 EXTRA_DIST = $(noinst_DATA) $(noinst_SCRIPTS)
+
+SUFFIXES = .dat
 mkinstalldirs = $(SHELL) $(top_srcdir)/mkinstalldirs
 CONFIG_CLEAN_FILES =  siddefs.h
 LIBRARIES =  $(lib_LIBRARIES)
@@ -77,9 +79,9 @@ DEFS = @DEFS@ -I. -I$(srcdir)
 CPPFLAGS = @CPPFLAGS@
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
-libmos6581_a_LIBADD = 
-libmos6581_a_OBJECTS =  sid.o voice.o wave.o envelope.o filter.o pot.o \
-sample_PST.o sample_PS_.o sample_P_T.o sample__ST.o
+libresid_a_LIBADD = 
+libresid_a_OBJECTS =  sid.o voice.o wave.o envelope.o filter.o pot.o \
+wave6581_PST.o wave6581_PS_.o wave6581_P_T.o wave6581__ST.o
 AR = ar
 SCRIPTS =  $(noinst_SCRIPTS)
 
@@ -97,13 +99,13 @@ DISTFILES = $(DIST_COMMON) $(SOURCES) $(HEADERS) $(TEXINFOS) $(EXTRA_DIST)
 
 TAR = tar
 GZIP = --best
-SOURCES = $(libmos6581_a_SOURCES)
-OBJECTS = $(libmos6581_a_OBJECTS)
+SOURCES = $(libresid_a_SOURCES)
+OBJECTS = $(libresid_a_OBJECTS)
 
 default: all
 
 .SUFFIXES:
-.SUFFIXES: .c .cc .o
+.SUFFIXES: .c .cc .dat .o
 $(srcdir)/Makefile.in: Makefile.am $(top_srcdir)/configure.in $(ACLOCAL_M4) 
 	cd $(top_srcdir) && $(AUTOMAKE) --gnu --include-deps sid/Makefile
 
@@ -157,10 +159,10 @@ distclean-compile:
 
 maintainer-clean-compile:
 
-libmos6581.a: $(libmos6581_a_OBJECTS) $(libmos6581_a_DEPENDENCIES)
-	rm -f libmos6581.a
-	$(AR) cru libmos6581.a $(libmos6581_a_OBJECTS) $(libmos6581_a_LIBADD)
-	$(RANLIB) libmos6581.a
+libresid.a: $(libresid_a_OBJECTS) $(libresid_a_DEPENDENCIES)
+	rm -f libresid.a
+	$(AR) cru libresid.a $(libresid_a_OBJECTS) $(libresid_a_LIBADD)
+	$(RANLIB) libresid.a
 .cc.o:
 	$(CXXCOMPILE) -c $<
 
@@ -203,7 +205,6 @@ distdir = $(top_builddir)/$(PACKAGE)-$(VERSION)/$(subdir)
 subdir = sid
 
 distdir: $(DISTFILES)
-	$(mkinstalldirs) $(distdir)/data
 	@for file in $(DISTFILES); do \
 	  d=$(srcdir); \
 	  test -f $(distdir)/$$file \
@@ -213,14 +214,14 @@ distdir: $(DISTFILES)
 envelope.o envelope.lo: envelope.cc envelope.h siddefs.h
 filter.o filter.lo: filter.cc filter.h siddefs.h
 pot.o pot.lo: pot.cc pot.h siddefs.h
-sample_PST.o sample_PST.lo: sample_PST.cc wave.h siddefs.h
-sample_PS_.o sample_PS_.lo: sample_PS_.cc wave.h siddefs.h
-sample_P_T.o sample_P_T.lo: sample_P_T.cc wave.h siddefs.h
-sample__ST.o sample__ST.lo: sample__ST.cc wave.h siddefs.h
 sid.o sid.lo: sid.cc sid.h siddefs.h voice.h wave.h envelope.h filter.h \
 	pot.h
 voice.o voice.lo: voice.cc voice.h siddefs.h wave.h envelope.h
 wave.o wave.lo: wave.cc wave.h siddefs.h
+wave6581_PST.o wave6581_PST.lo: wave6581_PST.cc wave.h siddefs.h
+wave6581_PS_.o wave6581_PS_.lo: wave6581_PS_.cc wave.h siddefs.h
+wave6581_P_T.o wave6581_P_T.lo: wave6581_P_T.cc wave.h siddefs.h
+wave6581__ST.o wave6581__ST.lo: wave6581__ST.cc wave.h siddefs.h
 
 info:
 dvi:
@@ -287,17 +288,11 @@ mostlyclean-generic distclean-generic clean-generic \
 maintainer-clean-generic clean mostlyclean distclean maintainer-clean
 
 
-sample_PST.cc : data/sample_PST.freq0800
-	$(PERL) ./samp2src.pl $* $< $@
-sample_PS_.cc : data/sample_PS_.freq1000
-	$(PERL) ./samp2src.pl $* $< $@
-sample_P_T.cc : data/sample_P_T.freq0800
-	$(PERL) ./samp2src.pl $* $< $@
-sample__ST.cc : data/sample__ST.freq0800
+.dat.cc:
 	$(PERL) ./samp2src.pl $* $< $@
 
 maintainer-clean-libLIBRARIES:
-	rm -f sample_PST.cc sample_PS_.cc sample_P_T.cc sample__ST.cc
+	rm -f  $(noinst_DATA:.dat=.cc)
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

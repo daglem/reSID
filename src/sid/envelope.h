@@ -35,6 +35,11 @@ class EnvelopeGenerator
 {
 public:
   EnvelopeGenerator();
+
+  void clock();
+  void clock(cycle_count delta_t);
+  void reset();
+
   void writeCONTROL_REG(reg8);
   void writeATTACK_DECAY(reg8);
   void writeSUSTAIN_RELEASE(reg8);
@@ -42,17 +47,13 @@ public:
 
   // 8-bit envelope output.
   reg8 output();
-private:
-  void reset();
-  void clock(cycle_count delta_t);
-  reg8 step_envelope(reg8 delta_envelope_max,
-		     reg8 rate_period_index,
-		     reg8 exponential_period_index,
-		     cycle_count& delta_t);
 
+protected:
   reg16 rate_counter;
+  reg16 rate_period;
   reg16 exponential_counter;
   reg8 envelope_counter;
+  bool hold_zero;
 
   reg4 attack;
   reg4 decay;
@@ -67,21 +68,12 @@ private:
   // counter period.
   static reg16 rate_counter_period[];
 
-  // The 5 levels at which the exponential counter period is changed.
-  static reg8 exponential_counter_level[];
-
-  // Lookup table to directly, from the envelope counter, find the line
-  // segment number of the approximation of an exponential.
-  static reg8 exponential_counter_segment[];
-
-  // Table to convert from line segment number to actual counter period.
+  // Lookup table to directly, from the envelope counter, find the current
+  // exponential counter period.
   static reg8 exponential_counter_period[];
 
   // The 16 selectable sustain levels.
   static reg8 sustain_level[];
-  
-friend class Voice;
-friend class SID;
 };
 
 
@@ -94,140 +86,155 @@ friend class SID;
 #if RESID_INLINE || defined(__ENVELOPE_CC__)
 
 // ----------------------------------------------------------------------------
-// Step the envelope counter a maximum of delta_envelope_max steps,
-// limited by delta_t.
-// If delta_envelope_max is zero, the rate and exponential counters keep
-// counting without stepping the envelope counter.
-// The rate counter counts up to its current comparison value, at which point
-// the counter is zeroed. The exponential counter has the same behavior.
+// SID clocking - 1 cycle.
 // ----------------------------------------------------------------------------
 #if RESID_INLINE
 inline
 #endif
-reg8 EnvelopeGenerator::step_envelope(reg8 delta_envelope_max,
-				      reg8 rate_period_index,
-				      reg8 exponential_period_index,
-				      cycle_count& delta_t)
+void EnvelopeGenerator::clock()
 {
-  // Fetch the rate divider period.
-  reg16 rate_period = rate_counter_period[rate_period_index];
-  
-  // Fetch the exponential divider period.
-  reg16 exponential_period =
-    exponential_counter_period[exponential_period_index];
-
   // Check for ADSR delay bug.
   // If the rate counter comparison value is set below the current value of the
   // rate counter, the counter will continue counting up, wrap to zero at
   // 2^15 = 0x8000, and finally reach the comparison value.
   // This has been verified by sampling ENV3.
-  // We assume that the comparison value is actually period - 1.
-  int rate_step = rate_counter < rate_period ?
-    rate_period - rate_counter : 0x8000 + rate_period - rate_counter;
-
-  reg8 delta_envelope = 0;
-
-  while (delta_t) {
-    if (delta_t < rate_step) {
-      rate_counter += delta_t;
-      rate_counter &= 0x7fff;
-      delta_t = 0;
-      return delta_envelope;
-    }
-
-    rate_counter = 0;
-    delta_t -= rate_step;
-    rate_step = rate_period;
-
-    // There is no delay bug for the exponential counter since it is reset
-    // whenever the gate bit is flipped.
-    if (++exponential_counter == exponential_period) {
-      exponential_counter = 0;
-      if (delta_envelope_max) {
-	if (++delta_envelope == delta_envelope_max) {
-	  return delta_envelope;
-	}
-      }
-    }
+  //
+  ++rate_counter &= 0x7fff;
+  if (rate_counter != rate_period) {
+    return;
   }
 
-  return delta_envelope;
+  rate_counter = 0;
+  
+  // The first envelope step in the attack state also resets the exponential
+  // counter. This has been verified by sampling ENV3.
+  //
+  if (state == ATTACK || ++exponential_counter
+      == exponential_counter_period[envelope_counter])
+  {
+    exponential_counter = 0;
+
+    // Check whether the envelope counter is frozen at zero.
+    if (hold_zero) {
+      return;
+    }
+
+    switch (state) {
+    case ATTACK:
+      // The envelope counter can flip from 0xff to 0x00 by changing state to
+      // release, then to attack. The envelope counter is then frozen at
+      // zero; to unlock this situation the state must be changed to release,
+      // then to attack. This has been verified by sampling ENV3.
+      //
+      ++envelope_counter &= 0xff;
+      if (envelope_counter == 0xff) {
+	state = DECAY_SUSTAIN;
+	rate_period = rate_counter_period[decay];
+      }
+      break;
+    case DECAY_SUSTAIN:
+      if (envelope_counter != sustain_level[sustain]) {
+	--envelope_counter;
+      }
+      break;
+    case RELEASE:
+      // The envelope counter can flip from 0x00 to 0xff by changing state to
+      // attack, then to release. The envelope counter will then continue
+      // counting down in the release state.
+      // This has been verified by sampling ENV3.
+      // NB! The operation below requires two's complement integer.
+      //
+      --envelope_counter &= 0xff;
+      break;
+    }
+    
+    // When the envelope counter is changed to zero, it is frozen at zero.
+    // This has been verified by sampling ENV3.
+    //
+    if (envelope_counter == 0) {
+      hold_zero = true;
+    }
+  }
 }
 
 
 // ----------------------------------------------------------------------------
-// SID clocking.
+// SID clocking - delta_t cycles.
 // ----------------------------------------------------------------------------
 #if RESID_INLINE
 inline
 #endif
 void EnvelopeGenerator::clock(cycle_count delta_t)
 {
-  // In attack state.
-  if (state == ATTACK) {
-    reg8 delta_envelope =
-      step_envelope(0xff - envelope_counter, attack, 0, delta_t);
-    
-    // Add to the envelope counter.
-    envelope_counter += delta_envelope;
+  // Check for ADSR delay bug.
+  // If the rate counter comparison value is set below the current value of the
+  // rate counter, the counter will continue counting up, wrap to zero at
+  // 2^15 = 0x8000, and finally reach the comparison value.
+  // This has been verified by sampling ENV3.
+  //
+  int rate_step = rate_counter <= rate_period ?
+    rate_period - rate_counter : 0x8000 + rate_period - rate_counter;
 
-    if (envelope_counter != 0xff) {
+  while (delta_t) {
+    if (delta_t < rate_step) {
+      rate_counter += delta_t;
+      rate_counter &= 0x7fff;
+      delta_t = 0;
       return;
     }
 
-    state = DECAY_SUSTAIN;
-  }
+    rate_counter = 0;
+    delta_t -= rate_step;
+    rate_step = rate_period;
 
-  // In decay/sustain state.
-  // We combine these states to ensure that the envelope counter continues
-  // decrementing if the sustain level is lowered.
-  if (state == DECAY_SUSTAIN) {
-    while (delta_t) {
-      // Find the line segment number of the approximation of an exponential
-      // from a lookup table.
-      reg8 segment = exponential_counter_segment[envelope_counter];
+    // The first envelope step in the attack state also resets the exponential
+    // counter. This has been verified by sampling ENV3.
+    //
+    if (state == ATTACK	|| ++exponential_counter
+	== exponential_counter_period[envelope_counter])
+    {
+      exponential_counter = 0;
 
-      // The start of the next line segment of the linear approximation of
-      // the exponential is found from another lookup table.
-      reg8 min_level = exponential_counter_level[segment];
-
-      // Check for sustain level.
-      if (min_level < sustain_level[sustain]) {
-	min_level = sustain_level[sustain];
+      // Check whether the envelope counter is frozen at zero.
+      if (hold_zero) {
+	continue;
       }
 
-      // Check whether the current sustain level is reached.
-      // If the sustain level is raised above the current envelope counter
-      // value the new sustain level is zero.
-      // Use int instead of reg8 because of signed result.
-      int delta_envelope_max = envelope_counter - min_level;
-      if (delta_envelope_max < 0) {
-	delta_envelope_max = envelope_counter;
+      switch (state) {
+      case ATTACK:
+	// The envelope counter can flip from 0xff to 0x00 by changing state to
+	// release, then to attack. The envelope counter is then frozen at
+	// zero; to unlock this situation the state must be changed to release,
+	// then to attack. This has been verified by sampling ENV3.
+	//
+	++envelope_counter &= 0xff;
+	if (envelope_counter == 0xff) {
+	  state = DECAY_SUSTAIN;
+	  rate_period = rate_counter_period[decay];
+	}
+	break;
+      case DECAY_SUSTAIN:
+	if (envelope_counter != sustain_level[sustain]) {
+	  --envelope_counter;
+	}
+	break;
+      case RELEASE:
+	// The envelope counter can flip from 0x00 to 0xff by changing state to
+	// attack, then to release. The envelope counter will then continue
+	// counting down in the release state.
+	// This has been verified by sampling ENV3.
+	// NB! The operation below requires two's complement integer.
+	//
+	--envelope_counter &= 0xff;
+	break;
       }
 
-      reg8 delta_envelope =
-	step_envelope(delta_envelope_max, decay, segment, delta_t);
-
-      // Subtract from the envelope counter.
-      envelope_counter -= delta_envelope;
-    }
-  }
-
-  // In release state.
-  // Identical to the decay/sustain state except for no sustain level check.
-  // if (state == RELEASE) {
-  else {
-    while (delta_t) {
-      reg8 segment = exponential_counter_segment[envelope_counter];
-      reg8 min_level = exponential_counter_level[segment];
-
-      reg8 delta_envelope_max = envelope_counter - min_level;
-
-      reg8 delta_envelope =
-	step_envelope(delta_envelope_max, release, segment, delta_t);
-
-      // Subtract from the envelope counter.
-      envelope_counter -= delta_envelope;
+      // When the envelope counter is changed to zero, it is frozen at zero.
+      // This has been verified by sampling ENV3.
+      //
+      if (envelope_counter == 0) {
+	hold_zero = true;
+      }
     }
   }
 }

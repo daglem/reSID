@@ -1,3 +1,24 @@
+1998-08-23  Dag Lem  <resid@nimrod.no>
+
+	* Version 0.3 released.
+
+	* envelope.h (EnvelopeGenerator::clock): Handle ADSR boundary bug.
+	
+	* envelope.cc (EnvelopeGenerator::rate_counter_period,
+	EnvelopeGenerator::exponential_counter_period): Corrected counter
+	periods.
+
+	* filter.h (Filter::clock): Optimized for speed (division by shifting).
+	
+	* sid.h (SID::clock): New one-cycle optimized overload of the clock()
+	function.
+	
+	* wave.h (WaveformGenerator::output_P_T): Combined waveform
+	pulse+triangle indexing corrected.
+	(WaveformGenerator::output_P__): Check for test bit to handle
+	pulse+test bit samples.
+	(WaveformGenerator::output): Optimized for speed (inlining).
+
 1998-07-28  Dag Lem  <resid@nimrod.no>
 
 	* Version 0.2 released.

@@ -36,6 +36,8 @@ typedef unsigned int reg24;
 typedef int cycle_count;
 typedef int sound_sample;
 
+enum chip_model { MOS6581, MOS8580 };
+
 // Inlining on/off.
 #define RESID_INLINE 1
 

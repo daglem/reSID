@@ -26,6 +26,15 @@ class Filter
 {
 public:
   Filter();
+
+  void enable_filter(bool enable);
+
+  void clock(sound_sample voice1, sound_sample voice2, sound_sample voice3);
+  void clock(cycle_count delta_t,
+  	     sound_sample voice1, sound_sample voice2, sound_sample voice3);
+  void reset();
+
+  // Write registers.
   void writeFC_LO(reg8);
   void writeFC_HI(reg8);
   void writeRES_FILT(reg8);
@@ -35,15 +44,12 @@ public:
   // Approximate range [-2048*255*3*15 * 2, 2047*255*3*15 * 2]
   sound_sample output();
 
-  // Filter bypass.
-  bool bypass;
-private:
-  void clock(cycle_count delta_t,
-  	     sound_sample voice1, sound_sample voice2, sound_sample voice3);
-  void reset();
-
+protected:
   void set_w0();
   void set_Q();
+
+  // Filter enabled.
+  bool enabled;
 
   // Filter cutoff frequency.
   reg12 fc;
@@ -76,7 +82,9 @@ private:
 
   // Cutoff frequency, resonance.
   sound_sample _2_pi_w0;
-  sound_sample _1000_Q;
+  sound_sample _1024_div_Q;
+
+  static double copysign(double x, double y);
 
 friend class SID;
 };
@@ -113,6 +121,49 @@ friend class SID;
 // Vhp is the output of the summer, Vbp is the output of the first integrator,
 // and Vlp is the output of the second integrator in the filter circuit.
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// SID clocking - 1 cycle.
+// ----------------------------------------------------------------------------
+#if RESID_INLINE
+inline
+#endif
+void Filter::clock(sound_sample voice1,
+		   sound_sample voice2,
+		   sound_sample voice3)
+{
+  // This is handy for testing.
+  if (!enabled) {
+    Vnf = voice1 + voice2 + (voice3off ? 0 : voice3);
+    Vhp = Vbp = Vlp = 0;
+    return;
+  }
+
+  // Route voices into or around filter.
+  sound_sample Vi = 0;
+  Vnf = 0;
+
+  (filt1 ? Vi : Vnf) += voice1;
+  (filt2 ? Vi : Vnf) += voice2;
+  (filt3 ? Vi : Vnf) += (voice3off ? 0 : voice3);
+
+  // delta_t is converted to seconds given a 1MHz clock by dividing
+  // with 1 000 000. This is done in two operations to avoid integer
+  // multiplication overflow.
+
+  // Calculate filter outputs.
+  sound_sample Vhp_next = (Vbp*_1024_div_Q >> 10) - Vlp + Vi;
+  sound_sample Vbp_next = Vbp - (_2_pi_w0*(Vhp >> 7) >> 13);
+  sound_sample Vlp_next = Vlp - (_2_pi_w0*(Vbp >> 7) >> 13);
+
+  Vhp = Vhp_next;
+  Vbp = Vbp_next;
+  Vlp = Vlp_next;
+}
+
+// ----------------------------------------------------------------------------
+// SID clocking - delta_t cycles.
+// ----------------------------------------------------------------------------
 #if RESID_INLINE
 inline
 #endif
@@ -122,7 +173,7 @@ void Filter::clock(cycle_count delta_t,
 		   sound_sample voice3)
 {
   // This is handy for testing.
-  if (bypass) {
+  if (!enabled) {
     Vnf = voice1 + voice2 + (voice3off ? 0 : voice3);
     Vhp = Vbp = Vlp = 0;
     return;
@@ -139,12 +190,14 @@ void Filter::clock(cycle_count delta_t,
   // delta_t is converted to seconds given a 1MHz clock by dividing
   // with 1 000 000. This is done in three operations to avoid integer
   // multiplication overflow.
-  sound_sample _2_pi_w0_delta_t = _2_pi_w0*delta_t/100;
 
   // Calculate filter outputs.
-  sound_sample Vhp_next = Vbp*1000/_1000_Q - Vlp + Vi;
-  sound_sample Vbp_next = Vbp - _2_pi_w0_delta_t*(Vhp/100)/100;
-  sound_sample Vlp_next = Vlp - _2_pi_w0_delta_t*(Vbp/100)/100;
+  sound_sample _2_pi_w0_delta_t = _2_pi_w0*delta_t >> 6;
+
+  sound_sample Vhp_next = (Vbp*_1024_div_Q >> 10) - Vlp + Vi;
+  sound_sample Vbp_next = Vbp - (_2_pi_w0_delta_t*(Vhp >> 7) >> 7);
+  sound_sample Vlp_next = Vlp - (_2_pi_w0_delta_t*(Vbp >> 7) >> 7);
+
   Vhp = Vhp_next;
   Vbp = Vbp_next;
   Vlp = Vlp_next;

@@ -29,17 +29,20 @@ class Voice
 public:
   // Constructor parameter is sync_source.
   Voice(Voice*);
-  WaveformGenerator wave;
-  EnvelopeGenerator envelope;
+
+  void reset();
+
   void writeCONTROL_REG(reg8);
 
   // Amplitude modulated waveform output.
   // Range [-2048*255, 2047*255].
   sound_sample output();
-private:
-  void reset();
 
-  friend class SID;
+protected:
+  WaveformGenerator wave;
+  EnvelopeGenerator envelope;
+
+friend class SID;
 };
 
 
