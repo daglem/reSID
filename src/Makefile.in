@@ -74,6 +74,7 @@ PERL = @PERL@
 RANLIB = @RANLIB@
 RESID_HAVE_BOOL = @RESID_HAVE_BOOL@
 RESID_INLINE = @RESID_INLINE@
+RESID_INLINING = @RESID_INLINING@
 VERSION = @VERSION@
 
 lib_LTLIBRARIES = libresid.la
@@ -319,6 +320,7 @@ distdir: $(DISTFILES)
 	    || cp -p $$d/$$file $(distdir)/$$file || :; \
 	  fi; \
 	done
+
 info-am:
 info: info-am
 dvi-am:
