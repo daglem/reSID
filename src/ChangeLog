@@ -1,3 +1,13 @@
+1998-08-28  Dag Lem  <resid@nimrod.no>
+
+	* Version 0.4 released.
+
+	* envelope.h (EnvelopeGenerator::clock): Count up to rate_period twice
+	during ADSR delay bug, and add one extra rate counter step.
+
+	* filter.cc (Filter::bsd_copysign): Renamed copysign function for
+	compilation on platforms where copysign is implemented as a macro.
+	
 1998-08-23  Dag Lem  <resid@nimrod.no>
 
 	* Version 0.3 released.

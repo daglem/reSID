@@ -1,3 +1,12 @@
+Changes in reSID version 0.4
+----------------------------
+
+The implementation of the ADSR delay bug has been refined and should now be
+cycle exact.
+
+The patch for VICE has been removed since VICE 0.15 will include reSID support.
+
+
 Changes in reSID version 0.3
 ----------------------------
 

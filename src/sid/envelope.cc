@@ -56,12 +56,12 @@ void EnvelopeGenerator::reset()
 // cycles between each increment of the envelope counter.
 // The rates have been verified by sampling ENV3. 
 //
-// The rate counter is a 15-bit register which is incremented each cycle.
+// The rate counter is a 16 bit register which is incremented each cycle.
 // When the counter reaches a specific comparison value, the envelope counter
 // is incremented (attack) or decremented (decay/release) and the
 // counter is zeroed.
 //
-// NB! Sampling ENV3 indicates that the calculated values are not exact.
+// NB! Sampling ENV3 shows that the calculated values are not exact.
 // It may seem like most calculated values have been rounded (.5 is rounded
 // down) and 1 has beed added to the result. A possible explanation for this
 // is that the SID designers have used the calculated values directly
@@ -72,27 +72,28 @@ void EnvelopeGenerator::reset()
 // of cycles from envelope level 1 to envelope level 255, and dividing the
 // number of cycles by 254. CIA1 timer A and B in linked mode can perform
 // the cycle count. This is the method used to find the rates below.
-// Making a sample from 8 cycle shifted samples is not sufficient for exact
-// values, since it is not possible to reset the rate counter (the test bit
-// has no influence on the envelope generator whatsoever). This means that the
-// time of the first count of the envelope counter can not be exactly
+// Making a full sample from 8 cycle shifted samples is also possible, however
+// it is then necessary to wait exactly the same cycle tuned interval between
+// each sample. This is because it is not possible to reset the rate counter
+// (the test bit has no influence on the envelope generator whatsoever).
+// The time of the first count of the envelope counter can not be exactly
 // controlled except possibly by resetting the chip.
 //
 // To avoid the ADSR delay bug, sampling of ENV3 should be done using
 // sustain = release = 0. This ensures that the attack state will not lower
 // the current rate counter period. The maximum error from the SID chip is now
-// 9 cycles. The code below adds a maximum error of 18 cycles:
+// 9 cycles. The code below adds a maximum error of 14 cycles:
 //
-// l1: lda $d41c
-//     cmp #$01
+//     lda #$01
+// l1: cmp $d41c
 //     bne l1
 //     ...
-// l2: lda $d41c
-//     cmp #$ff
+//     lda #$ff
+// l2: cmp $d41c
 //     bne l2
 //
-// The maximum timing error is thus 27 cycles, which yields a maximum error
-// for the calculated rate period of 27/254 cycles. The described method is
+// The maximum timing error is thus 23 cycles, which yields a maximum error
+// for the calculated rate period of 23/254 cycles. The described method is
 // thus sufficient for exact calculation of rate periods.
 //
 reg16 EnvelopeGenerator::rate_counter_period[] = {
@@ -121,6 +122,17 @@ reg16 EnvelopeGenerator::rate_counter_period[] = {
 // As a special case the period at zero level is 1; this only influences the
 // ADSR boundary bug.
 // All values have been verified by sampling ENV3.
+//
+// One extra cycle is spent at envelope level 0x5d in decay and release.
+// This is a delay caused by the comparison with the exponential counter,
+// and does not affect the rate counter. This has been verified by timing
+// 256 consecutive complete envelopes with A = D = R = 1, S = 0, using CIA1
+// timer A and B in linked mode. If the rate counter is not affected the
+// period of each complete envelope is
+// (255 + 162 + 39*2 + 28*4 + 12*8 + 8*16 + 6*30)*32 = 756*32 = 32352
+// which corresponds exactly to the timed value divided by the number of
+// complete envelopes.
+// NB! This one cycle delay is not modeled.
 //
 // Lookup table to directly, from the envelope counter, find the current
 // exponential counter period.

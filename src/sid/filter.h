@@ -84,7 +84,7 @@ protected:
   sound_sample _2_pi_w0;
   sound_sample _1024_div_Q;
 
-  static double copysign(double x, double y);
+  static double bsd_copysign(double x, double y);
 
 friend class SID;
 };

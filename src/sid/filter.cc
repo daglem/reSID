@@ -112,7 +112,7 @@ void Filter::writeMODE_VOL(reg8 mode_vol)
 
 
 // Non-POSIX copysign function.
-inline double Filter::copysign(double x, double y)
+inline double Filter::bsd_copysign(double x, double y)
 {
   return x < 0 ? (y < 0 ? x : -x) : (y >= 0 ? x : -x);
 }
@@ -131,7 +131,7 @@ void Filter::set_w0()
   // one particular Commodore 64.
   double x = fc - 920.0;
   double w0 =
-    228 + 3900/2*(1 + tanh(copysign(pow(fabs(x), 0.85)/95, x)));
+    228 + 3900/2*(1 + tanh(bsd_copysign(pow(fabs(x), 0.85)/95, x)));
 
   _2_pi_w0 = sound_sample(2*M_PI*w0*1.048576);
 }

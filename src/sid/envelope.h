@@ -23,7 +23,7 @@
 #include "siddefs.h"
 
 // ----------------------------------------------------------------------------
-// A 15 bit counter is used to implement the envelope rates, in effect
+// A 16 bit counter is used to implement the envelope rates, in effect
 // dividing the clock to the envelope counter by the currently selected rate
 // period.
 // In addition, another counter is used to implement the exponential envelope
@@ -95,17 +95,25 @@ void EnvelopeGenerator::clock()
 {
   // Check for ADSR delay bug.
   // If the rate counter comparison value is set below the current value of the
-  // rate counter, the counter will continue counting up, wrap to zero at
-  // 2^15 = 0x8000, and finally reach the comparison value.
+  // rate counter, the counter will continue counting up to 2^15 = 0x8000,
+  // and then count rate_period twice before the envelope can finally be
+  // stepped. In this process one extra rate_counter step is added.
   // This has been verified by sampling ENV3.
+  // A possible explanation for this behaviour is that the 16 bit rate counter
+  // is compared with a 15 bit comparator for reset and with a 16 bit counter
+  // for envelope steps.
   //
-  ++rate_counter &= 0x7fff;
-  if (rate_counter != rate_period) {
+  if ((++rate_counter & 0x7fff) != rate_period) {
+    return;
+  }
+
+  if (rate_counter & 0x8000) {
+    rate_counter = 1;
     return;
   }
 
   rate_counter = 0;
-  
+
   // The first envelope step in the attack state also resets the exponential
   // counter. This has been verified by sampling ENV3.
   //
@@ -168,19 +176,29 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
 {
   // Check for ADSR delay bug.
   // If the rate counter comparison value is set below the current value of the
-  // rate counter, the counter will continue counting up, wrap to zero at
-  // 2^15 = 0x8000, and finally reach the comparison value.
+  // rate counter, the counter will continue counting up to 2^15 = 0x8000,
+  // and then count rate_period twice before the envelope can finally be
+  // stepped. In this process one extra rate_counter step is added.
   // This has been verified by sampling ENV3.
+  // A possible explanation for this behaviour is that the 16 bit rate counter
+  // is compared with a 15 bit comparator for reset and with a 16 bit counter
+  // for envelope steps.
   //
-  int rate_step = rate_counter <= rate_period ?
-    rate_period - rate_counter : 0x8000 + rate_period - rate_counter;
+  reg16 rate_counter_15 = rate_counter & 0x7fff;
+  int rate_step = rate_counter_15 <= rate_period ?
+    rate_period - rate_counter_15 : 0x8000 + rate_period - rate_counter_15;
 
   while (delta_t) {
     if (delta_t < rate_step) {
       rate_counter += delta_t;
-      rate_counter &= 0x7fff;
-      delta_t = 0;
       return;
+    }
+
+    if ((rate_counter + rate_step) & 0x8000) {
+      rate_counter = 1;
+      delta_t -= rate_step;
+      rate_step = rate_period - 1;
+      continue;
     }
 
     rate_counter = 0;
