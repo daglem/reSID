@@ -103,15 +103,7 @@ typedef struct sound_s
 
     /* do we have a new sid or an old one? */
     BYTE		 newsid;
-    /* constants needed to implement write-only register reads */
-    BYTE		 laststore;
-    BYTE		 laststorebit;
-    CLOCK		 laststoreclk;
 } sound_t;
-
-
-/* clockcycles for each dropping bit when write-only register read is done */
-static u32_t sidreadclocks[9];
 
 
 /* SID initialization routine */
@@ -132,11 +124,8 @@ static void init_sid(sound_t *psid, s16_t *pbuf, int speed)
     else
 	warn_reset(psid->pwarn);
 
-    sid.filter.bypass = !app_resources.sidFilters;
+    sid.bypass_filter(!app_resources.sidFilters);
     psid->newsid = app_resources.sidModel;
-
-    for (i = 0; i < 9; i++)
-	sidreadclocks[i] = 13;
 }
 
 
@@ -1755,8 +1744,6 @@ void initialize_sound()
 /* adjust clk before overflow */
 void sid_prevent_clk_overflow()
 {
-    siddata.sid.laststoreclk -= PREVENT_CLK_OVERFLOW_SUB;
-
     if (!siddata.pdev)
 	return;
     siddata.wclk -= PREVENT_CLK_OVERFLOW_SUB;
@@ -1770,26 +1757,7 @@ BYTE REGPARM1 read_sid(ADDRESS addr)
   run_sid();
 
   addr &= 0x1f;
-  switch (addr) {
-  case 0x19:
-    return sid.potx.readPOT();
-  case 0x1a:
-    return sid.poty.readPOT();
-  case 0x1b:
-    return sid.voice3.wave.readOSC();
-  case 0x1c:
-    return sid.voice3.envelope.readENV();
-  }
-
-  CLOCK tmp;
-  while ((tmp = siddata.sid.laststorebit) &&
-	 (tmp = siddata.sid.laststoreclk + sidreadclocks[tmp]) < clk)
-  {
-    siddata.sid.laststoreclk = tmp;
-    siddata.sid.laststore &= 0xfeff >> siddata.sid.laststorebit--;
-  }
-
-  return siddata.sid.laststore;
+  return sid.read(addr);
 }
 
 
@@ -1805,87 +1773,7 @@ void REGPARM2 store_sid(ADDRESS addr, BYTE byte)
       closesid("Audio: store to sounddevice failed.");
   }
 
-  switch (addr) {
-  case 0x00:
-    sid.voice1.wave.writeFREQ_LO(byte);
-    break;
-  case 0x01:
-    sid.voice1.wave.writeFREQ_HI(byte);
-    break;
-  case 0x02:
-    sid.voice1.wave.writePW_LO(byte);
-    break;
-  case 0x03:
-    sid.voice1.wave.writePW_HI(byte);
-    break;
-  case 0x04:
-    sid.voice1.writeCONTROL_REG(byte);
-    break;
-  case 0x05:
-    sid.voice1.envelope.writeATTACK_DECAY(byte);
-    break;
-  case 0x06:
-    sid.voice1.envelope.writeSUSTAIN_RELEASE(byte);
-    break;
-  case 0x07:
-    sid.voice2.wave.writeFREQ_LO(byte);
-    break;
-  case 0x08:
-    sid.voice2.wave.writeFREQ_HI(byte);
-    break;
-  case 0x09:
-    sid.voice2.wave.writePW_LO(byte);
-    break;
-  case 0x0a:
-    sid.voice2.wave.writePW_HI(byte);
-    break;
-  case 0x0b:
-    sid.voice2.writeCONTROL_REG(byte);
-    break;
-  case 0x0c:
-    sid.voice2.envelope.writeATTACK_DECAY(byte);
-    break;
-  case 0x0d:
-    sid.voice2.envelope.writeSUSTAIN_RELEASE(byte);
-    break;
-  case 0x0e:
-    sid.voice3.wave.writeFREQ_LO(byte);
-    break;
-  case 0x0f:
-    sid.voice3.wave.writeFREQ_HI(byte);
-    break;
-  case 0x10:
-    sid.voice3.wave.writePW_LO(byte);
-    break;
-  case 0x11:
-    sid.voice3.wave.writePW_HI(byte);
-    break;
-  case 0x12:
-    sid.voice3.writeCONTROL_REG(byte);
-    break;
-  case 0x13:
-    sid.voice3.envelope.writeATTACK_DECAY(byte);
-    break;
-  case 0x14:
-    sid.voice3.envelope.writeSUSTAIN_RELEASE(byte);
-    break;
-  case 0x15:
-    sid.filter.writeFC_LO(byte);
-    break;
-  case 0x16:
-    sid.filter.writeFC_HI(byte);
-    break;
-  case 0x17:
-    sid.filter.writeRES_FILT(byte);
-    break;
-  case 0x18:
-    sid.filter.writeMODE_VOL(byte);
-    break;
-  }
-
-  siddata.sid.laststore = byte;
-  siddata.sid.laststorebit = 8;
-  siddata.sid.laststoreclk = clk;
+  sid.write(addr, byte);
 }
 
 

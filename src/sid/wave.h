@@ -109,7 +109,7 @@ friend class SID;
 
 // ----------------------------------------------------------------------------
 // Inline functions.
-// The following functions may be defined inline because they are called every
+// The following functions are defined inline because they are called every
 // time a sample is calculated.
 // ----------------------------------------------------------------------------
 

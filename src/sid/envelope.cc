@@ -42,77 +42,66 @@ void EnvelopeGenerator::reset()
 
   gate = false;
 
-  frequency_divider_counter = frequency_divider_number[release];
-  delta_t_remainder = 0;
+  rate_counter = 0;
+  exponential_counter = 0;
 
   state = RELEASE;
 }
 
 
-// Frequency divider numbers are calculated from the Envelope Rates table in
-// the Programmer's Reference Guide. The rates have been verified by
-// sampling ENV3. The frequency divider number is the number of cycles between
-// each increment of the envelope counter.
+// Rate counter periods are calculated from the Envelope Rates table in
+// the Programmer's Reference Guide. The rate counter period is the number of
+// cycles between each increment of the envelope counter.
+// The rates have been verified by sampling ENV3. 
 //
-// The frequency divider loads a number into a 16-bit counter and decrements
-// this counter each cycle. When the counter reaches zero the 8-bit envelope
-// counter is incremented (attack) or decremented (decay/release) and the
-// frequency divider number is loaded into the 16-bit counter again.
+// The rate counter is a 15-bit register which is incremented each cycle.
+// When the counter reaches a specific comparison value, the envelope counter
+// is incremented (attack) or decremented (decay/release) and the
+// counter is zeroed.
 //
 // NB! Sampling ENV3 indicates that the calculated values are not exact.
-// It may seem like 1 is added to the calculated values. A possible explanation
-// for this is that the SID designers have used the calculated values directly
-// to feed the frequency divider, not considering that if a register is loaded
-// with a number and decremented down to zero before the register is reloaded,
-// the period is actually the frequency divider number + 1.
-
-// The exact frequency divider numbers are yet to be verified because
-// we have been making a full sample from 8 cycle shifted samples, and
-// the envelope counter is sometimes incremented once almost immediately after
-// the gate bit is set instead of after the number of cycles indicated by the
-// frequency divider number. This is explained by that if the frequency divider
-// has counted down to zero on the same cycle that the gate bit is set, the
-// envelope will count up to one immediately.
+// It may seem like most calculated values have been rounded (.5 is rounded
+// down) and 1 has beed added to the result. A possible explanation for this
+// is that the SID designers have used the calculated values directly
+// as rate counter comparison values, not considering a one cycle delay to
+// zero the counter. This would yield an actual period of comparison value + 1.
 //
-// We would need a REU (Ram Expansion Unit) DMA to sample ENV3 every cycle
-// or find a way to avoid this behavior to determine the exact values.
-// We are using the calculated values even if e.g. the frequency divider
-// number for attack is verified to be 9, not 8, until someone volunteers to
-// set his REU to work to count e.g. the number of consequtive 1's for each
-// attack rate.
+// The exact rate counter period must be determined using a REU
+// (RAM Expansion Unit) DMA to sample ENV3 every cycle. Making a full sample
+// from 8 cycle shifted samples is not sufficient for exact values, since
+// it is not possible to reset the rate counter. This means that is is not
+// possible to exactly control the time of the first count of the envelope
+// counter.
 //
-// NB! Sampling of ENV3 has to be done using sustain = release = 0.
-// Using other values for e.g. release may yield constant 0 from ENV3.
-// This is not modeled.
+// NB! To avoid the ADSR delay bug, sampling of ENV3 should be done using
+// sustain = release = 0. This ensures that the attack state will not lower
+// the current rate counter period.
 //
-// Note that this behavior fortunately has no effect on the internal envelope
-// counter (the audio output is not silenced), it is just the ENV3 register
-// that does not reflect the counter correctly.
-//
-reg16 EnvelopeGenerator::frequency_divider_number[] = {
-      8,  //   2ms*1.0MHz/256 =     7.81
-     31,  //   8ms*1.0MHz/256 =    31.25
+reg16 EnvelopeGenerator::rate_counter_period[] = {
+      9,  //   2ms*1.0MHz/256 =     7.81
+     32,  //   8ms*1.0MHz/256 =    31.25
      63,  //  16ms*1.0MHz/256 =    62.50
-     94,  //  24ms*1.0MHz/256 =    93.75
-    148,  //  38ms*1.0MHz/256 =   148.44
-    219,  //  56ms*1.0MHz/256 =   218.75
-    266,  //  68ms*1.0MHz/256 =   265.63
+     95,  //  24ms*1.0MHz/256 =    93.75
+    149,  //  38ms*1.0MHz/256 =   148.44
+    220,  //  56ms*1.0MHz/256 =   218.75
+    267,  //  68ms*1.0MHz/256 =   265.63
     313,  //  80ms*1.0MHz/256 =   312.50
-    391,  // 100ms*1.0MHz/256 =   390.63
+    392,  // 100ms*1.0MHz/256 =   390.63
     977,  // 250ms*1.0MHz/256 =   976.56
-   1953,  // 500ms*1.0MHz/256 =  1953.13
-   3125,  // 800ms*1.0MHz/256 =  3125.00
+   1954,  // 500ms*1.0MHz/256 =  1953.13
+   3126,  // 800ms*1.0MHz/256 =  3125.00
    3906,  //   1 s*1.0MHz/256 =  3906.25
-  11719,  //   3 s*1.0MHz/256 = 11718.75
-  19531,  //   5 s*1.0MHz/256 = 19531.25
-  31250   //   8 s*1.0MHz/256 = 31250.00
+  11720,  //   3 s*1.0MHz/256 = 11718.75
+  19532,  //   5 s*1.0MHz/256 = 19531.25
+  31252   //   8 s*1.0MHz/256 = 31250.00
 };
 
-// For decay and release, the clock to the envelope generator is sequentially
-// divided by two to create a piece-wise linear approximation of an
-// exponential at the following envelope counter values: 93, 54, 26, 14, 6
+// For decay and release, the clock to the envelope counter is sequentially
+// divided by 1, 2, 4, 8, 16, 30 to create a piece-wise linear approximation
+// of an exponential at the envelope counter values 93, 54, 26, 14, 6.
+// This has been verified by sampling ENV3.
 //
-reg8 EnvelopeGenerator::exponential_divide_level[] = {
+reg8 EnvelopeGenerator::exponential_counter_level[] = {
   0x5d,
   0x36,
   0x1a,
@@ -121,9 +110,10 @@ reg8 EnvelopeGenerator::exponential_divide_level[] = {
   0x00
 };
 
-// Lookup table to directly, from the envelope counter, find the number of
-// bits to right-shift the clock to the frequency divider.
-reg8 EnvelopeGenerator::exponential_shift[] = {
+// Lookup table to directly, from the envelope counter, find the line
+// segment number of the approximation of an exponential.
+//
+reg8 EnvelopeGenerator::exponential_counter_segment[] = {
   /* 0x00: */  5, 5, 5, 5, 5, 5, 5, 4,  // 0x06
   /* 0x08: */  4, 4, 4, 4, 4, 4, 4, 3,  // 0x0e
   /* 0x10: */  3, 3, 3, 3, 3, 3, 3, 3,
@@ -158,8 +148,20 @@ reg8 EnvelopeGenerator::exponential_shift[] = {
   /* 0xf8: */  0, 0, 0, 0, 0, 0, 0, 0
 };
 
+// Table to convert from line segment number to actual counter period.
+//
+reg8 EnvelopeGenerator::exponential_counter_period[] = {
+  1,
+  2,
+  4,
+  8,
+  16,
+  30
+};
+
 // From the sustain levels it follows that both the low and high 4 bits of the
 // envelope counter are compared to the 4-bit sustain value.
+// This has been verified by sampling ENV3.
 //
 reg8 EnvelopeGenerator::sustain_level[] = {
   0x00,
@@ -188,17 +190,19 @@ void EnvelopeGenerator::writeCONTROL_REG(reg8 control)
 {
   bool gate_next = control & 0x01;
 
+  // Flipping the gate bit resets the exponential counter, however the rate
+  // counter is not reset. Thus there will be a delay before the envelope
+  // counter starts counting up (attack) or down (release).
+
   // Gate bit on: Start attack, decay, sustain.
   if (!gate && gate_next) {
-    frequency_divider_counter = frequency_divider_number[attack];
-    delta_t_remainder = 0;
     state = ATTACK;
+    exponential_counter = 0;
   }
   // Gate bit off: Start release.
   else if (gate && !gate_next) {
-    frequency_divider_counter = frequency_divider_number[release];
-    delta_t_remainder = 0;
     state = RELEASE;
+    exponential_counter = 0;
   }
 
   gate = gate_next;

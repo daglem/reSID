@@ -1,0 +1,25 @@
+1998-07-28  Dag Lem  <resid@nimrod.no>
+
+	* Version 0.2 released.
+
+	* envelope.h (EnvelopeGenerator::clock): Start decay cycle immediately
+	at envelope counter 0xff. New sustain value is zero if the sustain
+	level is raised above the current envelope counter value.
+	(EnvelopeGenerator::step_envelope): Handle ADSR delay bug.
+	
+	* envelope.cc (EnvelopeGenerator::rate_counter_period,
+	EnvelopeGenerator::exponential_counter_period): Corrected counter
+	periods.
+	(EnvelopeGenerator::writeCONTROL_REG): Do not modify rate counter.
+
+	* filter.cc (Filter::set_Q): Constrain Q to keep filter stable.
+	
+	* sid.h (SID::read, SID::write, SID::bypass_filter): Simplified API
+	routing register access through the SID class.
+
+	* sid.cc (SID::output): Corrected variable-bit audio output return.
+	(SID::read, SID::write): Allow read of write only registers.
+
+1998-06-09  Dag Lem  <resid@nimrod.no>
+
+	* Version 0.1 released.

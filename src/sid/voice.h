@@ -45,7 +45,7 @@ private:
 
 // ----------------------------------------------------------------------------
 // Inline functions.
-// The following function may be defined inline because it is called every
+// The following function is defined inline because it is called every
 // time a sample is calculated.
 // ----------------------------------------------------------------------------
 

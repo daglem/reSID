@@ -39,6 +39,8 @@ void SID::reset()
   voice2.reset();
   voice3.reset();
   filter.reset();
+
+  bus_value = 0;
 }
 
 
@@ -55,7 +57,139 @@ int SID::output()
 
 int SID::output(int bits)
 {
-  return -filter.output()/(4095*255*3*15*2/(2 << bits));
+  return -filter.output()/(4095*255*3*15*2/(1 << bits));
+}
+
+
+// ----------------------------------------------------------------------------
+// Read registers.
+//
+// Reading a write only register returns the last byte written to any SID
+// register. The individual bits in this value start to fade down towards
+// zero after a few cycles. All bits reach zero within approximately
+// $2000 - $4000 cycles.
+// NB! This is not modeled.
+// It has been claimed that this fading happens in an orderly fashion, however
+// sampling of write only registers reveals that this is not the case.
+// The actual use of write only registers has largely been made in the belief
+// that all SID registers are readable. To support this belief the read
+// would have to be done immediately after a write to the same register
+// (remember that an intermediate write to another register would yield that
+// value instead). With this in mind we return the last value written to
+// any SID register without modeling the bit fading.
+// ----------------------------------------------------------------------------
+reg8 SID::read(reg8 offset)
+{
+  switch (offset) {
+  case 0x19:
+    return potx.readPOT();
+  case 0x1a:
+    return poty.readPOT();
+  case 0x1b:
+    return voice3.wave.readOSC();
+  case 0x1c:
+    return voice3.envelope.readENV();
+  default:
+    return bus_value;
+  }
+}
+
+
+// ----------------------------------------------------------------------------
+// Write registers.
+// ----------------------------------------------------------------------------
+void SID::write(reg8 offset, reg8 value)
+{
+  bus_value = value;
+
+  switch (offset) {
+  case 0x00:
+    voice1.wave.writeFREQ_LO(value);
+    break;
+  case 0x01:
+    voice1.wave.writeFREQ_HI(value);
+    break;
+  case 0x02:
+    voice1.wave.writePW_LO(value);
+    break;
+  case 0x03:
+    voice1.wave.writePW_HI(value);
+    break;
+  case 0x04:
+    voice1.writeCONTROL_REG(value);
+    break;
+  case 0x05:
+    voice1.envelope.writeATTACK_DECAY(value);
+    break;
+  case 0x06:
+    voice1.envelope.writeSUSTAIN_RELEASE(value);
+    break;
+  case 0x07:
+    voice2.wave.writeFREQ_LO(value);
+    break;
+  case 0x08:
+    voice2.wave.writeFREQ_HI(value);
+    break;
+  case 0x09:
+    voice2.wave.writePW_LO(value);
+    break;
+  case 0x0a:
+    voice2.wave.writePW_HI(value);
+    break;
+  case 0x0b:
+    voice2.writeCONTROL_REG(value);
+    break;
+  case 0x0c:
+    voice2.envelope.writeATTACK_DECAY(value);
+    break;
+  case 0x0d:
+    voice2.envelope.writeSUSTAIN_RELEASE(value);
+    break;
+  case 0x0e:
+    voice3.wave.writeFREQ_LO(value);
+    break;
+  case 0x0f:
+    voice3.wave.writeFREQ_HI(value);
+    break;
+  case 0x10:
+    voice3.wave.writePW_LO(value);
+    break;
+  case 0x11:
+    voice3.wave.writePW_HI(value);
+    break;
+  case 0x12:
+    voice3.writeCONTROL_REG(value);
+    break;
+  case 0x13:
+    voice3.envelope.writeATTACK_DECAY(value);
+    break;
+  case 0x14:
+    voice3.envelope.writeSUSTAIN_RELEASE(value);
+    break;
+  case 0x15:
+    filter.writeFC_LO(value);
+    break;
+  case 0x16:
+    filter.writeFC_HI(value);
+    break;
+  case 0x17:
+    filter.writeRES_FILT(value);
+    break;
+  case 0x18:
+    filter.writeMODE_VOL(value);
+    break;
+  default:
+    break;
+  }
+}
+
+
+// ----------------------------------------------------------------------------
+// Bypass filter.
+// ----------------------------------------------------------------------------
+void SID::bypass_filter(bool bypass)
+{
+  filter.bypass = bypass;
 }
 
 

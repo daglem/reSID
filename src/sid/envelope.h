@@ -22,6 +22,15 @@
 
 #include "siddefs.h"
 
+// ----------------------------------------------------------------------------
+// A 15 bit counter is used to implement the envelope rates, in effect
+// dividing the clock to the envelope counter by the currently selected rate
+// period.
+// In addition, another counter is used to implement the exponential envelope
+// decay, in effect further dividing the clock to the envelope counter.
+// The period of this counter is successively set to 1, 2, 4, 8, 16, 30 at
+// the envelope counter values 93, 54, 26, 14, 6.
+// ----------------------------------------------------------------------------
 class EnvelopeGenerator
 {
 public:
@@ -36,16 +45,14 @@ public:
 private:
   void reset();
   void clock(cycle_count delta_t);
-  reg16 step_envelope(reg16 delta_envelope_max,
-		      reg8 divider_index,
-		      reg8 shifts,
-		      cycle_count& delta_t);
+  reg8 step_envelope(reg8 delta_envelope_max,
+		     reg8 rate_period_index,
+		     reg8 exponential_period_index,
+		     cycle_count& delta_t);
 
-  reg16 frequency_divider_counter;
+  reg16 rate_counter;
+  reg16 exponential_counter;
   reg8 envelope_counter;
-
-  // Unused clocks to the frequency divider.
-  cycle_count delta_t_remainder;
 
   reg4 attack;
   reg4 decay;
@@ -56,16 +63,19 @@ private:
 
   enum { ATTACK, DECAY_SUSTAIN, RELEASE } state;
 
-  // Frequency divider numbers.
-  static reg16 frequency_divider_number[];
+  // Lookup table to convert from attack, decay, or release value to rate
+  // counter period.
+  static reg16 rate_counter_period[];
 
-  // The 5 levels at which the clock to the envelope generator is
-  // sequentially divided by two.
-  static reg8 exponential_divide_level[];
+  // The 5 levels at which the exponential counter period is changed.
+  static reg8 exponential_counter_level[];
 
-  // Lookup table to directly, from the envelope counter, find the number of
-  // bits to right-shift the clock to the frequency divider.
-  static reg8 exponential_shift[];
+  // Lookup table to directly, from the envelope counter, find the line
+  // segment number of the approximation of an exponential.
+  static reg8 exponential_counter_segment[];
+
+  // Table to convert from line segment number to actual counter period.
+  static reg8 exponential_counter_period[];
 
   // The 16 selectable sustain levels.
   static reg8 sustain_level[];
@@ -77,7 +87,7 @@ friend class SID;
 
 // ----------------------------------------------------------------------------
 // Inline functions.
-// The following functions may be defined inline because they are called every
+// The following functions are defined inline because they are called every
 // time a sample is calculated.
 // ----------------------------------------------------------------------------
 
@@ -86,80 +96,62 @@ friend class SID;
 // ----------------------------------------------------------------------------
 // Step the envelope counter a maximum of delta_envelope_max steps,
 // limited by delta_t.
-// If delta_envelope_max is zero, the frequency divider counter keeps counting
-// without stepping the envelope counter.
-// The frequency divider is modeled using a frequency divider counter to
-// ensure that things work correctly even if the divider changes during ADS
-// or R.
-// The counter is counted down to zero at which point the the divider is
-// reloaded with the current divider number.
-// delta_envelope_max cannot be 8 bit since the maximum value is 256.
-// This also holds for the returned value.
+// If delta_envelope_max is zero, the rate and exponential counters keep
+// counting without stepping the envelope counter.
+// The rate counter counts up to its current comparison value, at which point
+// the counter is zeroed. The exponential counter has the same behavior.
 // ----------------------------------------------------------------------------
 #if RESID_INLINE
 inline
 #endif
-reg16 EnvelopeGenerator::step_envelope(reg16 delta_envelope_max,
-				       reg8 divider_index,
-				       reg8 shifts,
-				       cycle_count& delta_t)
+reg8 EnvelopeGenerator::step_envelope(reg8 delta_envelope_max,
+				      reg8 rate_period_index,
+				      reg8 exponential_period_index,
+				      cycle_count& delta_t)
 {
-  // Divide the clock to the frequency counter with a multiple of 2^n.
-  // Add the remaining unused cycles from last time.
-  cycle_count delta_t_total = delta_t + delta_t_remainder;
-  cycle_count delta_t_divided = delta_t_total >> shifts;
-
-  // Calculate remaining unused cycles.
-  cycle_count remainder_mask = 0x1f >> (5 - shifts);
-  delta_t_remainder = delta_t_total & remainder_mask;
-
-  // Check whether delta_t_divided is large enough to step the envelope.
-  if (delta_t_divided < static_cast<cycle_count>(frequency_divider_counter)) {
-    frequency_divider_counter -= delta_t_divided;
-    delta_t = 0;
-    return 0;
-  }
-
-  // First step completed.
-  delta_t_divided -= frequency_divider_counter;
-
-  // Fetch the frequency divider number (the period of the divider).
-  reg16 divider = frequency_divider_number[divider_index];
+  // Fetch the rate divider period.
+  reg16 rate_period = rate_counter_period[rate_period_index];
   
-  // Envelope step allowed (not at sustain or zero level).
-  if (delta_envelope_max) {
-    // The number of times to clock the divider.
-    cycle_count delta_t_min = delta_t_divided;
+  // Fetch the exponential divider period.
+  reg16 exponential_period =
+    exponential_counter_period[exponential_period_index];
 
-    // The number of clocks needed to increment the envelope counter
-    // delta_envelope_max - 1  times. The first step is already completed.
-    cycle_count delta_t_next = divider*(delta_envelope_max - 1);
+  // Check for ADSR delay bug.
+  // If the rate counter comparison value is set below the current value of the
+  // rate counter, the counter will continue counting up, wrap to zero at
+  // 2^15 = 0x8000, and finally reach the comparison value.
+  // This has been verified by sampling ENV3.
+  // We assume that the comparison value is actually period - 1.
+  int rate_step = rate_counter < rate_period ?
+    rate_period - rate_counter : 0x8000 + rate_period - rate_counter;
 
-    // Step no more than delta_envelope_max steps.
-    if (delta_t_next < delta_t_min) {
-      delta_t_min = delta_t_next;
+  reg8 delta_envelope = 0;
+
+  while (delta_t) {
+    if (delta_t < rate_step) {
+      rate_counter += delta_t;
+      rate_counter &= 0x7fff;
+      delta_t = 0;
+      return delta_envelope;
     }
 
-    // Subtract a multiple of 2^n cycles from delta_t.
-    delta_t = (delta_t_divided - delta_t_min) << shifts;
+    rate_counter = 0;
+    delta_t -= rate_step;
+    rate_step = rate_period;
 
-    // Calculate new counter value.
-    frequency_divider_counter = divider - delta_t_min%divider;
-
-    // The first step is already completed, so 1 is added to the number
-    // of steps.
-    return (1 + delta_t_min/divider);
+    // There is no delay bug for the exponential counter since it is reset
+    // whenever the gate bit is flipped.
+    if (++exponential_counter == exponential_period) {
+      exponential_counter = 0;
+      if (delta_envelope_max) {
+	if (++delta_envelope == delta_envelope_max) {
+	  return delta_envelope;
+	}
+      }
+    }
   }
-  // No envelope step allowed, still clock the frequency divider.
-  else {
-    // All available cycles are used.
-    delta_t = 0;
 
-    // Calculate new counter value.
-    frequency_divider_counter = divider - delta_t_divided%divider;
-
-    return 0;
-  }
+  return delta_envelope;
 }
 
 
@@ -173,18 +165,17 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
 {
   // In attack state.
   if (state == ATTACK) {
-    reg16 delta_envelope =
-      step_envelope(0x100 - envelope_counter, attack, 0, delta_t);
+    reg8 delta_envelope =
+      step_envelope(0xff - envelope_counter, attack, 0, delta_t);
     
     // Add to the envelope counter.
-    if (envelope_counter + delta_envelope == 0x100) {
-      envelope_counter = 0xff;
-      state = DECAY_SUSTAIN;
-    }
-    else {
-      envelope_counter += delta_envelope;
+    envelope_counter += delta_envelope;
+
+    if (envelope_counter != 0xff) {
       return;
     }
+
+    state = DECAY_SUSTAIN;
   }
 
   // In decay/sustain state.
@@ -192,14 +183,13 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
   // decrementing if the sustain level is lowered.
   if (state == DECAY_SUSTAIN) {
     while (delta_t) {
-      // The clock to the envelope generator is sequentially divided by two at
-      // 5 specific envelope counter levels. We find the number of bits
-      // to right-shift the clock from a lookup table.
-      reg8 shifts = exponential_shift[envelope_counter];
+      // Find the line segment number of the approximation of an exponential
+      // from a lookup table.
+      reg8 segment = exponential_counter_segment[envelope_counter];
 
       // The start of the next line segment of the linear approximation of
       // the exponential is found from another lookup table.
-      reg8 min_level = exponential_divide_level[shifts];
+      reg8 min_level = exponential_counter_level[segment];
 
       // Check for sustain level.
       if (min_level < sustain_level[sustain]) {
@@ -207,16 +197,16 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
       }
 
       // Check whether the current sustain level is reached.
-      reg16 delta_envelope_max;
-      if (envelope_counter <= min_level) {
-	delta_envelope_max = 0;
+      // If the sustain level is raised above the current envelope counter
+      // value the new sustain level is zero.
+      // Use int instead of reg8 because of signed result.
+      int delta_envelope_max = envelope_counter - min_level;
+      if (delta_envelope_max < 0) {
+	delta_envelope_max = envelope_counter;
       }
-      else {
-	delta_envelope_max = envelope_counter - min_level;
-      }
-      
-      reg16 delta_envelope =
-	step_envelope(delta_envelope_max, decay, shifts, delta_t);
+
+      reg8 delta_envelope =
+	step_envelope(delta_envelope_max, decay, segment, delta_t);
 
       // Subtract from the envelope counter.
       envelope_counter -= delta_envelope;
@@ -228,12 +218,13 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
   // if (state == RELEASE) {
   else {
     while (delta_t) {
-      reg8 shifts = exponential_shift[envelope_counter];
-      reg8 min_level = exponential_divide_level[shifts];
+      reg8 segment = exponential_counter_segment[envelope_counter];
+      reg8 min_level = exponential_counter_level[segment];
 
-      reg16 delta_envelope_max = envelope_counter - min_level;
-      reg16 delta_envelope =
-	step_envelope(delta_envelope_max, release, shifts, delta_t);
+      reg8 delta_envelope_max = envelope_counter - min_level;
+
+      reg8 delta_envelope =
+	step_envelope(delta_envelope_max, release, segment, delta_t);
 
       // Subtract from the envelope counter.
       envelope_counter -= delta_envelope;

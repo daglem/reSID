@@ -125,5 +125,9 @@ void Filter::set_Q()
   // Q is controlled linearly by res. Q has approximate range [0.707, 1.7].
   // n2 should have been calculated as 2 - 1/Q, however it seems like Vi
   // is divided by n2 before entering the filter circuit.
-  _1000_Q = 707 + 1000*res/0x0f;
+  // As resonance is increased, the filter must be clocked more often to keep
+  // stable.
+  // NB! To avoid even higher demands on the CPU, Q is limited to 1.3.
+  // _1000_Q = 707 + 1000*res/0x0f;
+  _1000_Q = 707 + 600*res/0x0f;
 }

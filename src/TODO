@@ -1,4 +1,11 @@
+* Improve combined waveforms.
+
+* Implement pulse samples.
+
+* More C64 filter measurements. The audio output stage in the C64 is not
+  modeled. This does high-pass filtering and may have audible effects.
+
 * Write documentation. Possibly a paper describing how SID was reverse
   engineered.
 
-* Implement a SID tune player.
+* Implement a SID tune player. Put on ice because of the SIDPLAY support.

@@ -37,13 +37,23 @@ public:
   // n-bit output.
   int output(int bits);
 
+  // Read/write registers.
+  reg8 read(reg8 offset);
+  void write(reg8 offset, reg8 value);
+
+  // Bypass filter.
+  void bypass_filter(bool bypass);
+
+protected:
   Voice voice1;
   Voice voice2;
   Voice voice3;
   Filter filter;
   Potentiometer potx;
   Potentiometer poty;
+
 private:
+  reg8 bus_value;
   Voice* voice[3];
 };
 

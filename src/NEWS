@@ -1,0 +1,10 @@
+Changes in reSID version 0.2
+----------------------------
+
+The implementation of the Envelope Generator has been rewritten to handle
+the infamous ADSR delay bug. All known envelope related bugs have been
+corrected.
+
+The maximum filter resonance is lowered to keep the filter stable.
+
+The reSID API has been simplified. Reading write only registers is allowed.
