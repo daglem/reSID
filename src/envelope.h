@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2001  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2002  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -184,10 +184,14 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
   // comparator for envelope steps.
   //
   reg16 rate_counter_15 = rate_counter & 0x7fff;
-  int rate_step = rate_counter_15 <= rate_period ?
-    rate_period - rate_counter_15 : 0x8000 + rate_period - rate_counter_15;
 
-  while (delta_t) {
+  // NB! This requires two's complement integer.
+  int rate_step = rate_period - rate_counter_15;
+  if (rate_step < 0) {
+    rate_step += 0x8000;
+  }
+
+  for (; delta_t; rate_step = rate_period) {
     if (delta_t < rate_step) {
       rate_counter += delta_t;
       return;
@@ -202,7 +206,6 @@ void EnvelopeGenerator::clock(cycle_count delta_t)
 
     rate_counter = 0;
     delta_t -= rate_step;
-    rate_step = rate_period;
 
     // The first envelope step in the attack state also resets the exponential
     // counter. This has been verified by sampling ENV3.
