@@ -36,13 +36,14 @@ public:
   void enable_external_filter(bool enable);
   bool set_sampling_parameters(double clock_freq, sampling_method method,
 			       double sample_freq, double pass_freq = -1);
+  void adjust_sampling_frequency(double sample_freq);
 
   void fc_default(const fc_point*& points, int& count);
   PointPlotter<sound_sample> fc_plotter();
 
   void clock();
   void clock(cycle_count delta_t);
-  int clock(cycle_count& delta_t, short* buf, int n);
+  int clock(cycle_count& delta_t, short* buf, int n, int interleave = 1);
   void reset();
   
   // Read/write registers.
@@ -78,9 +79,12 @@ public:
 
 protected:
   static double I0(double x);
-  RESID_INLINE int clock_fast(cycle_count& delta_t, short* buf, int n);
-  RESID_INLINE int clock_interpolate(cycle_count& delta_t, short* buf, int n);
-  RESID_INLINE int clock_resample(cycle_count& delta_t, short* buf, int n);
+  RESID_INLINE int clock_fast(cycle_count& delta_t, short* buf, int n,
+			      int interleave);
+  RESID_INLINE int clock_interpolate(cycle_count& delta_t, short* buf, int n,
+				     int interleave);
+  RESID_INLINE int clock_resample(cycle_count& delta_t, short* buf, int n,
+				  int interleave);
 
   Voice voice[3];
   Filter filter;
@@ -90,6 +94,8 @@ protected:
 
   reg8 bus_value;
   cycle_count bus_value_ttl;
+
+  double clock_frequency;
 
   // Sampling variables.
   cycle_count sample_offset;

@@ -89,8 +89,8 @@ void WaveformGenerator::writePW_HI(reg8 pw_hi)
 void WaveformGenerator::writeCONTROL_REG(reg8 control)
 {
   waveform = (control >> 4) & 0x0f;
-  ring_mod = static_cast<bool>(control & 0x04);
-  sync = static_cast<bool>(control & 0x02);
+  ring_mod = control & 0x04;
+  sync = control & 0x02;
 
   reg8 test_next = control & 0x08;
 
@@ -116,7 +116,7 @@ void WaveformGenerator::writeCONTROL_REG(reg8 control)
     shift_register = 0x7ffff8;
   }
 
-  test = static_cast<bool>(test_next);
+  test = test_next;
 
   // The gate bit is handled by the EnvelopeGenerator.
 }
@@ -136,9 +136,9 @@ void WaveformGenerator::reset()
   freq = 0;
   pw = 0;
 
-  test = false;
-  ring_mod = false;
-  sync = false;
+  test = 0;
+  ring_mod = 0;
+  sync = 0;
 
   msb_rising = false;
 }

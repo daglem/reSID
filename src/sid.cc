@@ -41,6 +41,9 @@ void SID::set_chip_model(chip_model model)
   for (int i = 0; i < 3; i++) {
     voice[i].wave.set_chip_model(model);
   }
+
+  filter.set_chip_model(model);
+  extfilt.set_chip_model(model);
 }
 
 
@@ -66,12 +69,30 @@ void SID::reset()
 // ----------------------------------------------------------------------------
 int SID::output()
 {
-  return extfilt.output()/(8192*3*15*2/65536);
+  const int range = 1 << 16;
+  const int half = range >> 1;
+  int sample = extfilt.output()/((4095*255 >> 7)*3*15*2/range);
+  if (sample >= half) {
+    return half - 1;
+  }
+  if (sample < -half) {
+    return -half;
+  }
+  return sample;
 }
 
 int SID::output(int bits)
 {
-  return extfilt.output()/(8192*3*15*2/(1 << bits));
+  const int range = 1 << bits;
+  const int half = range >> 1;
+  int sample = extfilt.output()/((4095*255 >> 7)*3*15*2/range);
+  if (sample >= half) {
+    return half - 1;
+  }
+  if (sample < -half) {
+    return -half;
+  }
+  return sample;
 }
 
 
@@ -398,6 +419,7 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
     }
   }
 
+  clock_frequency = clock_freq;
   sampling = method;
 
   cycles_per_sample =
@@ -458,6 +480,25 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
   sample_index = 0;
 
   return true;
+}
+
+
+// ----------------------------------------------------------------------------
+// Adjustment of SID sampling frequency.
+//
+// In some applications, e.g. a C64 emulator, it can be desirable to
+// synchronize sound with a timer source. This is supported by adjustment of
+// the SID sampling frequency.
+//
+// NB! Adjustment of the sampling frequency may lead to noticeable shifts in
+// frequency, and should only be used for interactive applications. Note also
+// that any adjustment of the sampling frequency will change the
+// characteristics of the resampling filter, since the filter is not rebuilt.
+// ----------------------------------------------------------------------------
+void SID::adjust_sampling_frequency(double sample_freq)
+{
+  cycles_per_sample =
+    cycle_count(clock_frequency/sample_freq*(1 << 10) + 0.5);
 }
 
 
@@ -610,16 +651,16 @@ void SID::clock(cycle_count delta_t)
 // }
 // 
 // ----------------------------------------------------------------------------
-int SID::clock(cycle_count& delta_t, short* buf, int n)
+int SID::clock(cycle_count& delta_t, short* buf, int n, int interleave)
 {
   switch (sampling) {
   default:
   case SAMPLE_FAST:
-    return clock_fast(delta_t, buf, n);
+    return clock_fast(delta_t, buf, n, interleave);
   case SAMPLE_INTERPOLATE:
-    return clock_interpolate(delta_t, buf, n);
+    return clock_interpolate(delta_t, buf, n, interleave);
   case SAMPLE_RESAMPLE:
-    return clock_resample(delta_t, buf, n);
+    return clock_resample(delta_t, buf, n, interleave);
   }
 }
 
@@ -627,7 +668,8 @@ int SID::clock(cycle_count& delta_t, short* buf, int n)
 // SID clocking with audio sampling - delta clocking picking nearest sample.
 // ----------------------------------------------------------------------------
 RESID_INLINE
-int SID::clock_fast(cycle_count& delta_t, short* buf, int n)
+int SID::clock_fast(cycle_count& delta_t, short* buf, int n,
+		    int interleave)
 {
   int s = 0;
 
@@ -642,8 +684,8 @@ int SID::clock_fast(cycle_count& delta_t, short* buf, int n)
     }
     clock(delta_t_sample);
     delta_t -= delta_t_sample;
-    sample_offset = next_sample_offset & 0x3ff - (1 << 9);
-    buf[s++] = output();
+    sample_offset = (next_sample_offset & 0x3ff) - (1 << 9);
+    buf[s++*interleave] = output();
   }
 
   clock(delta_t);
@@ -663,7 +705,8 @@ int SID::clock_fast(cycle_count& delta_t, short* buf, int n)
 // sampling noise.
 // ----------------------------------------------------------------------------
 RESID_INLINE
-int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n)
+int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n,
+			   int interleave)
 {
   int s = 0;
   int i;
@@ -689,7 +732,8 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n)
     sample_offset = next_sample_offset & 0x3ff;
 
     short sample_now = output();
-    buf[s++] = sample_prev + (sample_offset*(sample_now - sample_prev) >> 10);
+    buf[s++*interleave] =
+      sample_prev + (sample_offset*(sample_now - sample_prev) >> 10);
     sample_prev = sample_now;
   }
 
@@ -724,7 +768,8 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n)
 // dependent in the C++ standard. It is crucial for speed, however.
 // ----------------------------------------------------------------------------
 RESID_INLINE
-int SID::clock_resample(cycle_count& delta_t, short* buf, int n)
+int SID::clock_resample(cycle_count& delta_t, short* buf, int n,
+			int interleave)
 {
   int s = 0;
 
@@ -773,7 +818,7 @@ int SID::clock_resample(cycle_count& delta_t, short* buf, int n)
       j &= 0x3fff;
     }
 
-    buf[s++] = v >> FIR_SHIFT;
+    buf[s++*interleave] = v >> FIR_SHIFT;
   }
 
   for (int i = 0; i < delta_t; i++) {

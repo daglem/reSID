@@ -39,7 +39,7 @@
 // The circuit is modeled based on the explanation found there except that
 // an additional inverter is used in the feedback from the bandpass output,
 // allowing the summer op-amp to operate in single-ended mode. This yields
-// inverted filter outputs with level independent of Q, which corresponds with
+// inverted filter outputs with levels independent of Q, which corresponds with
 // the results obtained from a real SID.
 //
 // We have been able to model the summer and the two integrators of the circuit
@@ -73,6 +73,18 @@
 // vi -----R1--           |             |             |
 // 
 //                       vhp           vbp           vlp
+// 
+// 
+// vi  - input voltage
+// vhp - highpass output
+// vbp - bandpass output
+// vlp - lowpass output
+// [A> - op-amp
+// R1  - summer resistor
+// Rq  - resistor array controlling resonance (4 resistors)
+// R   - NMOS FET voltage controlled resistor controlling cutoff frequency
+// Rs  - shunt resitor
+// C   - capacitor
 // 
 // 
 // 
@@ -112,6 +124,7 @@ public:
   Filter();
 
   void enable_filter(bool enable);
+  void set_chip_model(chip_model model);
 
   RESID_INLINE
   void clock(sound_sample voice1, sound_sample voice2, sound_sample voice3);
@@ -148,19 +161,23 @@ protected:
 
   // External audio input routed through filter.
   // NB! Not modeled.
-  bool filtex;
+  reg8 filtex;
 
   // Voices routed through filter.
   reg8 filt3_filt2_filt1;
 
   // Switch voice 3 off.
-  bool voice3off;
+  reg8 voice3off;
 
   // Highpass, bandpass, and lowpass filter modes.
   reg8 hp_bp_lp;
 
   // Output master volume.
   reg4 vol;
+
+  // Voice and mixer DC offsets.
+  sound_sample voice_DC;
+  sound_sample mixer_DC;
 
   // State of filter.
   sound_sample Vhp; // highpass
@@ -172,10 +189,15 @@ protected:
   sound_sample w0;
   sound_sample _1024_div_Q;
 
-  // Cutoff frequency table.
+  // Cutoff frequency tables.
   // FC is an 11 bit register.
-  sound_sample f0[2048];
-  static fc_point f0_points[];
+  sound_sample f0_6581[2048];
+  sound_sample f0_8580[2048];
+  sound_sample* f0;
+  static fc_point f0_points_6581[];
+  static fc_point f0_points_8580[];
+  fc_point* f0_points;
+  int f0_count;
 
 friend class SID;
 };
@@ -197,9 +219,10 @@ void Filter::clock(sound_sample voice1,
 		   sound_sample voice2,
 		   sound_sample voice3)
 {
+  // Add separate DC offset to each voice.
   // Scale each voice down from 20 to 13 bits.
-  voice1 >>= 7;
-  voice2 >>= 7;
+  voice1 = (voice1 >> 7) + voice_DC;
+  voice2 = (voice2 >> 7) + voice_DC;
 
   // NB! Voice 3 is only silenced by voice3off if it is not routed through
   // the filter.
@@ -207,7 +230,7 @@ void Filter::clock(sound_sample voice1,
     voice3 = 0;
   }
   else {
-    voice3 >>= 7;
+    voice3 = (voice3 >> 7) + voice_DC;
   }
 
   // This is handy for testing.
@@ -265,7 +288,7 @@ void Filter::clock(sound_sample voice1,
   // with 1 000 000.
 
   // Calculate filter outputs.
-  // Vhp = Vbp/Q - Vlp + Vi;
+  // Vhp = Vbp/Q - Vlp - Vi;
   // dVbp = -w0*Vhp*dt;
   // dVlp = -w0*Vbp*dt;
 
@@ -273,7 +296,7 @@ void Filter::clock(sound_sample voice1,
   sound_sample dVlp = (w0*Vbp >> 20);
   Vbp -= dVbp;
   Vlp -= dVlp;
-  Vhp = (Vbp*_1024_div_Q >> 10) - Vlp + Vi;
+  Vhp = (Vbp*_1024_div_Q >> 10) - Vlp - Vi;
 }
 
 // ----------------------------------------------------------------------------
@@ -285,9 +308,10 @@ void Filter::clock(cycle_count delta_t,
 		   sound_sample voice2,
 		   sound_sample voice3)
 {
+  // Add separate DC offset to each voice.
   // Scale each voice down from 20 to 13 bits.
-  voice1 >>= 7;
-  voice2 >>= 7;
+  voice1 = (voice1 >> 7) + voice_DC;
+  voice2 = (voice2 >> 7) + voice_DC;
 
   // NB! Voice 3 is only silenced by voice3off if it is not routed through
   // the filter.
@@ -295,7 +319,7 @@ void Filter::clock(cycle_count delta_t,
     voice3 = 0;
   }
   else {
-    voice3 >>= 7;
+    voice3 = (voice3 >> 7) + voice_DC;
   }
 
   // Enable filter on/off.
@@ -356,6 +380,11 @@ void Filter::clock(cycle_count delta_t,
   // cutoff frequency and resonance constraints is approximately 8.
   cycle_count delta_t_flt = 8;
 
+  // Limit f0 to 4kHz to keep filter stable.
+  const double pi = 3.1415926535897932385;
+  const sound_sample w0_max = static_cast<sound_sample>(2*pi*4000*1.048576);
+  sound_sample w0_ceil = w0 <= w0_max ? w0 : w0_max;
+
   while (delta_t) {
     if (delta_t < delta_t_flt) {
       delta_t_flt = delta_t;
@@ -366,16 +395,16 @@ void Filter::clock(cycle_count delta_t,
     // multiplication overflow.
 
     // Calculate filter outputs.
-    // Vhp = Vbp/Q - Vlp + Vi;
+    // Vhp = Vbp/Q - Vlp - Vi;
     // dVbp = -w0*Vhp*dt;
     // dVlp = -w0*Vbp*dt;
-    sound_sample w0_delta_t = w0*delta_t_flt >> 6;
+    sound_sample w0_delta_t = w0_ceil*delta_t_flt >> 6;
 
     sound_sample dVbp = (w0_delta_t*Vhp >> 14);
     sound_sample dVlp = (w0_delta_t*Vbp >> 14);
     Vbp -= dVbp;
     Vlp -= dVlp;
-    Vhp = (Vbp*_1024_div_Q >> 10) + Vi - Vlp;
+    Vhp = (Vbp*_1024_div_Q >> 10) - Vlp - Vi;
 
     delta_t -= delta_t_flt;
   }
@@ -388,11 +417,9 @@ void Filter::clock(cycle_count delta_t,
 RESID_INLINE
 sound_sample Filter::output()
 {
-  const sound_sample Vmax = 4096*3;
-
   // This is handy for testing.
   if (!enabled) {
-    return -((Vnf + Vmax)*static_cast<sound_sample>(vol));
+    return -(Vnf + mixer_DC)*static_cast<sound_sample>(vol);
   }
 
   // Mix highpass, bandpass, and lowpass outputs. The sum is not
@@ -434,12 +461,11 @@ sound_sample Filter::output()
     break;
   }
 
-  // Sum non-filtered output, filtered output, and signal offset.
-  // The filter output is inverted compared to the non-filtered output.
+  // Sum non-filtered and filtered output.
   // Multiply the sum with volume.
   // The output is inverted. This should not make any audible difference,
   // but is included for correctness.
-  return -((Vnf - Vf + Vmax)*static_cast<sound_sample>(vol));
+  return -(Vnf + Vf + mixer_DC)*static_cast<sound_sample>(vol);
 }
 
 #endif // RESID_INLINING || defined(__FILTER_CC__)
