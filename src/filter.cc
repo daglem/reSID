@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2003  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2004  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -131,10 +131,14 @@ Filter::Filter()
   enable_filter(true);
 
   // Create mappings from FC to cutoff frequency.
-  set_chip_model(MOS8580);
-  interpolate(f0_points, f0_points + f0_count - 1, fc_plotter(), 1.0);
+  interpolate(f0_points_6581, f0_points_6581
+	      + sizeof(f0_points_6581)/sizeof(*f0_points_6581) - 1,
+	      PointPlotter<sound_sample>(f0_6581), 1.0);
+  interpolate(f0_points_8580, f0_points_8580
+	      + sizeof(f0_points_8580)/sizeof(*f0_points_8580) - 1,
+	      PointPlotter<sound_sample>(f0_8580), 1.0);
+
   set_chip_model(MOS6581);
-  interpolate(f0_points, f0_points + f0_count - 1, fc_plotter(), 1.0);
 }
 
 

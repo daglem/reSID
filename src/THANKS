@@ -34,7 +34,7 @@ between his excellent SID emulation and, given enough CPU power, the reSID
 emulator engine. Tibor Biczo, Andreas Boose, and André Fachat have provided
 combined waveform samples for 6581 R1, R3, R4, and 8580 R5 SID chips.
 The VICE home page is found at:
-http://viceteam.bei.t-online.de/
+http://www.viceteam.org/
 
 The author of SIDPLAY, Michael Schwendt, has implemented a patch to link
 libsidplay with reSID. Using his excellent tune player he has pointed out
@@ -70,6 +70,18 @@ version of the ADSR emulation.
 
 Laurent Ovaert found and fixed a bug in the fast version of the noise
 register shift routine.
+
+Andreas Dehmel has reported all sorts of initialization and overflow
+errors.
+
+Laurent Ganier demonstrated two crucial techniques for vectorizable
+filter convolution in a patch. Firstly, he made the filter elements
+correspond to the sampling frequency, allowing the linear
+interpolation to be factorized out from the convolution. Secondly, he
+duplicated elements in the sample ring buffer, achieving contiguous
+storage of the samples. The current resampling implementation builds
+on these ideas, improving on them by using shifted filter tables for
+generalization and accuracy.
 
 Finally I would like to thank my business partner Stian W. Arnesen for
 putting up with all this nonsense.

@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2003  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2004  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -30,6 +30,7 @@ class SID
 {
 public:
   SID();
+  ~SID();
 
   void set_chip_model(chip_model model);
   void enable_filter(bool enable);
@@ -65,7 +66,9 @@ public:
     reg24 accumulator[3];
     reg24 shift_register[3];
     reg16 rate_counter[3];
+    reg16 rate_counter_period[3];
     reg16 exponential_counter[3];
+    reg16 exponential_counter_period[3];
     reg8 envelope_counter[3];
     EnvelopeGenerator::State envelope_state[3];
     bool hold_zero[3];
@@ -88,8 +91,10 @@ protected:
 			      int interleave);
   RESID_INLINE int clock_interpolate(cycle_count& delta_t, short* buf, int n,
 				     int interleave);
-  RESID_INLINE int clock_resample(cycle_count& delta_t, short* buf, int n,
-				  int interleave);
+  RESID_INLINE int clock_resample_interpolate(cycle_count& delta_t, short* buf,
+					      int n, int interleave);
+  RESID_INLINE int clock_resample_fast(cycle_count& delta_t, short* buf,
+				       int n, int interleave);
 
   Voice voice[3];
   Filter filter;
@@ -105,25 +110,37 @@ protected:
   // External audio input.
   int ext_in;
 
-  // Sampling variables.
-  cycle_count sample_offset;
-  short sample_prev;
-  unsigned int sample_index;
-  short sample[16384];
-
-  // Sampling constants.
-  static const int FIR_ORDER = 123;
-  static const int FIR_N = FIR_ORDER/2 + 1;
-  static const int FIR_RES = 512;
+  // Resampling constants.
+  // The error in interpolated lookup is bounded by 1.234/L^2,
+  // while the error in non-interpolated lookup is bounded by
+  // 0.7854/L + 0.4113/L^2, see
+  // http://www-ccrma.stanford.edu/~jos/resample/Choice_Table_Size.html
+  // For a resolution of 16 bits this yields L >= 285 and L >= 51473,
+  // respectively.
+  static const int FIR_N = 125;
+  static const int FIR_RES_INTERPOLATE = 285;
+  static const int FIR_RES_FAST = 51473;
   static const int FIR_SHIFT = 15;
+  static const int RINGSIZE = 16384;
+
+  // Fixpoint constants (16.16 bits).
+  static const int FIXP_SHIFT = 16;
+  static const int FIXP_MASK = 0xffff;
+
+  // Sampling variables.
   sampling_method sampling;
   cycle_count cycles_per_sample;
-  cycle_count fstep_per_cycle;
-  cycle_count sample_delay;
+  cycle_count sample_offset;
+  int sample_index;
+  short sample_prev;
   int fir_N;
-  int foffset_max;
-  short fir[FIR_N*FIR_RES + 1];
-  short fir_diff[FIR_N*FIR_RES + 1];
+  int fir_RES;
+
+  // Ring buffer with overflow for contiguous storage of RINGSIZE samples.
+  short* sample;
+
+  // FIR_RES filter tables (FIR_N*FIR_RES).
+  short* fir;
 };
 
 #endif // not __SID_H__
