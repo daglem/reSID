@@ -1,3 +1,12 @@
+1998-09-06  Dag Lem  <resid@nimrod.no>
+
+	* Version 0.5 released.
+
+	* version.cc (resid_version_string): Version string with C linkage.
+	
+	* wave.cc (WaveformGenerator::set_chip_model): Emulation of MOS8580
+	combined waveforms.
+
 1998-08-28  Dag Lem  <resid@nimrod.no>
 
 	* Version 0.4 released.

@@ -291,7 +291,7 @@ void SID::clock(cycle_count delta_t)
 
 	cycle_count delta_t_next = delta_accumulator/freq;
 	if (delta_accumulator%freq) {
-	  delta_t_next++;
+	  ++delta_t_next;
 	}
 
 	if (delta_t_next < delta_t_min) {

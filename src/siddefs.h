@@ -38,7 +38,16 @@ typedef int sound_sample;
 
 enum chip_model { MOS6581, MOS8580 };
 
+extern "C"
+{
+#ifndef __VERSION_CC__
+extern const char* resid_version_string;
+#else
+const char* resid_version_string = VERSION;
+#endif
+}
+
 // Inlining on/off.
-#define RESID_INLINE @RESID_INLINE@
+#define RESID_INLINE 1
 
 #endif // not __SIDDEFS_H__

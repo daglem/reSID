@@ -28,7 +28,9 @@ VICE has been an inspiration for this project, and testing of reSID has
 been greatly simplified by VICEs -sounddev dump option. Teemu Rantanen
 has written support for reSID in VICE, making it possible to choose at runtime
 between his excellent SID emulation and, given enough CPU power, the reSID
-emulator engine. The VICE home page is found at:
+emulator engine. Tibor Biczo, Andreas Boose, and André Fachat have provided
+combined waveform samples for 6581 R1, R3, R4, and 8580 R5 SID chips.
+The VICE home page is found at:
 http://www.tu-chemnitz.de/~fachat/vice/
 
 The author of SIDPLAY, Michael Schwendt, has implemented a patch to link

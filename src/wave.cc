@@ -45,14 +45,12 @@ void WaveformGenerator::set_chip_model(chip_model model)
     wave_PS_ = wave6581_PS_;
     wave_PST = wave6581_PST;
   }
-#if 0
   else {
     wave__ST = wave8580__ST;
     wave_P_T = wave8580_P_T;
     wave_PS_ = wave8580_PS_;
     wave_PST = wave8580_PST;
   }
-#endif
 }
 
 

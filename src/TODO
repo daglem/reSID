@@ -1,5 +1,3 @@
-* Include combined waveforms for the MOS8580.
-
 * Determine how and when the SID filter op-amps clip. Spice may perhaps be
   used to simulate the filter circuit.
 

@@ -102,6 +102,10 @@ protected:
   static reg8 wave6581_P_T[];
   static reg8 wave6581_PS_[];
   static reg8 wave6581_PST[];
+  static reg8 wave8580__ST[];
+  static reg8 wave8580_P_T[];
+  static reg8 wave8580_PS_[];
+  static reg8 wave8580_PST[];
 
   reg8* wave__ST;
   reg8* wave_P_T;
@@ -179,7 +183,7 @@ void WaveformGenerator::clock(cycle_count delta_t)
 
   // Determine whether bit 19 is set after the 2^20 multiple.
   if (!(accumulator_prev & 0x080000) && (accumulator_next & 0x080000)) {
-    shifts++;
+    ++shifts;
   }
 
   // Shift the noise/random register.
