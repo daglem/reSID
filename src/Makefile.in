@@ -62,16 +62,17 @@ MAKEINFO = @MAKEINFO@
 PACKAGE = @PACKAGE@
 PERL = @PERL@
 RANLIB = @RANLIB@
+RESID_HAVE_BOOL = @RESID_HAVE_BOOL@
 RESID_INLINE = @RESID_INLINE@
 VERSION = @VERSION@
 
 lib_LIBRARIES = libresid.a
 
-libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc pot.cc version.cc $(noinst_DATA:.dat=.cc)
+libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc extfilt.cc pot.cc version.cc $(noinst_DATA:.dat=.cc)
 
 BUILT_SOURCES = $(noinst_DATA:.dat=.cc)
 
-pkginclude_HEADERS = siddefs.h sid.h voice.h wave.h envelope.h filter.h pot.h
+pkginclude_HEADERS = siddefs.h sid.h voice.h wave.h envelope.h filter.h extfilt.h pot.h spline.h
 
 noinst_DATA = wave6581_PST.dat wave6581_PS_.dat wave6581_P_T.dat wave6581__ST.dat wave8580_PST.dat wave8580_PS_.dat wave8580_P_T.dat wave8580__ST.dat
 
@@ -91,9 +92,10 @@ CPPFLAGS = @CPPFLAGS@
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
 libresid_a_LIBADD = 
-libresid_a_OBJECTS =  sid.o voice.o wave.o envelope.o filter.o pot.o \
-version.o wave6581_PST.o wave6581_PS_.o wave6581_P_T.o wave6581__ST.o \
-wave8580_PST.o wave8580_PS_.o wave8580_P_T.o wave8580__ST.o
+libresid_a_OBJECTS =  sid.o voice.o wave.o envelope.o filter.o extfilt.o \
+pot.o version.o wave6581_PST.o wave6581_PS_.o wave6581_P_T.o \
+wave6581__ST.o wave8580_PST.o wave8580_PS_.o wave8580_P_T.o \
+wave8580__ST.o
 AR = ar
 SCRIPTS =  $(noinst_SCRIPTS)
 
@@ -278,9 +280,11 @@ distdir: $(DISTFILES)
 	  || cp -p $$d/$$file $(distdir)/$$file; \
 	done
 envelope.o: envelope.cc envelope.h siddefs.h
-filter.o: filter.cc filter.h siddefs.h
+extfilt.o: extfilt.cc extfilt.h siddefs.h
+filter.o: filter.cc filter.h siddefs.h spline.h
 pot.o: pot.cc pot.h siddefs.h
-sid.o: sid.cc sid.h siddefs.h voice.h wave.h envelope.h filter.h pot.h
+sid.o: sid.cc sid.h siddefs.h voice.h wave.h envelope.h filter.h \
+	spline.h extfilt.h pot.h
 version.o: version.cc siddefs.h
 voice.o: voice.cc voice.h siddefs.h wave.h envelope.h
 wave.o: wave.cc wave.h siddefs.h
