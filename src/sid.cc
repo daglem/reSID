@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2002  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2003  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -258,6 +258,7 @@ SID::State::State()
     rate_counter[i] = 0;
     exponential_counter[i] = 0;
     envelope_counter[i] = 0;
+    envelope_state[i] = EnvelopeGenerator::RELEASE;
     hold_zero[i] = 0;
   }
 }
@@ -313,6 +314,7 @@ SID::State SID::read_state()
     state.rate_counter[i] = voice[i].envelope.rate_counter;
     state.exponential_counter[i] = voice[i].envelope.exponential_counter;
     state.envelope_counter[i] = voice[i].envelope.envelope_counter;
+    state.envelope_state[i] = voice[i].envelope.state;
     state.hold_zero[i] = voice[i].envelope.hold_zero;
   }
 
@@ -327,7 +329,7 @@ void SID::write_state(const State& state)
 {
   int i;
 
-  for (i = 0; i < 0x18; i++) {
+  for (i = 0; i <= 0x18; i++) {
     write(i, state.sid_register[i]);
   }
 
@@ -340,6 +342,7 @@ void SID::write_state(const State& state)
     voice[i].envelope.rate_counter = state.rate_counter[i];
     voice[i].envelope.exponential_counter = state.exponential_counter[i];
     voice[i].envelope.envelope_counter = state.envelope_counter[i];
+    voice[i].envelope.state = state.envelope_state[i];
     voice[i].envelope.hold_zero = state.hold_zero[i];
   }
 }
@@ -411,7 +414,8 @@ double SID::I0(double x)
 // not overfilled.
 // ----------------------------------------------------------------------------
 bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
-				  double sample_freq, double pass_freq)
+				  double sample_freq, double pass_freq,
+				  double filter_scale)
 {
   // Check resampling constraints.
   if (method == SAMPLE_RESAMPLE) {
@@ -430,6 +434,12 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
     }
     // Check whether the FIR table would overfill.
     else if (pass_freq > 0.9*sample_freq/2) {
+      return false;
+    }
+
+    // The filter scaling is only included to avoid clipping, so keep
+    // it sane.
+    if (filter_scale < 0.9 || filter_scale > 1.0) {
       return false;
     }
   }
@@ -474,12 +484,12 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
   for (int i = fir_N*FIR_RES; i > 0; i--) {
     double wt = wc*i/FIR_RES;
     double temp = double(i)/(fir_N*FIR_RES);
-    val1 = (1 << FIR_SHIFT)*samples_per_cycle*wc/pi*sin(wt)/wt*I0(beta*sqrt(1.0 - temp*temp))/I0beta;
+    val1 = (1 << FIR_SHIFT)*filter_scale*samples_per_cycle*wc/pi*sin(wt)/wt*I0(beta*sqrt(1.0 - temp*temp))/I0beta;
     fir[i] = short(val1 + 0.5);
     fir_diff[i] = short(val2 - val1 + 0.5);
     val2 = val1;
   }
-  val1 = (1 << FIR_SHIFT)*samples_per_cycle*wc/pi;
+  val1 = (1 << FIR_SHIFT)*filter_scale*samples_per_cycle*wc/pi;
   fir[0] = short(val1 + 0.5);
   fir_diff[0] = short(val2 - val1 + 0.5);
 
@@ -833,7 +843,18 @@ int SID::clock_resample(cycle_count& delta_t, short* buf, int n,
       j &= 0x3fff;
     }
 
-    buf[s++*interleave] = v >> FIR_SHIFT;
+    v >>= FIR_SHIFT;
+
+    // Saturated arithmetics to guard against 16 bit sample overflow.
+    const int half = 1 << 15;
+    if (v >= half) {
+      v = half - 1;
+    }
+    else if (v < -half) {
+      v = -half;
+    }
+
+    buf[s++*interleave] = v;
   }
 
   for (int i = 0; i < delta_t; i++) {

@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2002  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2003  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -35,7 +35,8 @@ public:
   void enable_filter(bool enable);
   void enable_external_filter(bool enable);
   bool set_sampling_parameters(double clock_freq, sampling_method method,
-			       double sample_freq, double pass_freq = -1);
+			       double sample_freq, double pass_freq = -1,
+			       double filter_scale = 0.97);
   void adjust_sampling_frequency(double sample_freq);
 
   void fc_default(const fc_point*& points, int& count);
@@ -66,6 +67,7 @@ public:
     reg16 rate_counter[3];
     reg16 exponential_counter[3];
     reg8 envelope_counter[3];
+    EnvelopeGenerator::State envelope_state[3];
     bool hold_zero[3];
   };
     
@@ -113,7 +115,7 @@ protected:
   static const int FIR_ORDER = 123;
   static const int FIR_N = FIR_ORDER/2 + 1;
   static const int FIR_RES = 512;
-  static const int FIR_SHIFT = 16;
+  static const int FIR_SHIFT = 15;
   sampling_method sampling;
   cycle_count cycles_per_sample;
   cycle_count fstep_per_cycle;
