@@ -1,0 +1,304 @@
+# Makefile.in generated automatically by automake 1.2 from Makefile.am
+
+# Copyright (C) 1994, 1995, 1996, 1997 Free Software Foundation, Inc.
+# This Makefile.in is free software; the Free Software Foundation
+# gives unlimited permission to copy, distribute and modify it.
+
+
+SHELL = /bin/sh
+
+srcdir = @srcdir@
+top_srcdir = @top_srcdir@
+VPATH = @srcdir@
+prefix = @prefix@
+exec_prefix = @exec_prefix@
+
+bindir = @bindir@
+sbindir = @sbindir@
+libexecdir = @libexecdir@
+datadir = @datadir@
+sysconfdir = @sysconfdir@
+sharedstatedir = @sharedstatedir@
+localstatedir = @localstatedir@
+libdir = @libdir@
+infodir = @infodir@
+mandir = @mandir@
+includedir = @includedir@
+oldincludedir = /usr/include
+
+pkgdatadir = $(datadir)/@PACKAGE@
+pkglibdir = $(libdir)/@PACKAGE@
+pkgincludedir = $(includedir)/@PACKAGE@
+
+top_builddir = ..
+
+ACLOCAL = @ACLOCAL@
+AUTOCONF = @AUTOCONF@
+AUTOMAKE = @AUTOMAKE@
+AUTOHEADER = @AUTOHEADER@
+
+INSTALL = @INSTALL@
+INSTALL_PROGRAM = @INSTALL_PROGRAM@
+INSTALL_DATA = @INSTALL_DATA@
+INSTALL_SCRIPT = @INSTALL_SCRIPT@
+transform = @program_transform_name@
+
+NORMAL_INSTALL = true
+PRE_INSTALL = true
+POST_INSTALL = true
+NORMAL_UNINSTALL = true
+PRE_UNINSTALL = true
+POST_UNINSTALL = true
+CXX = @CXX@
+MAKEINFO = @MAKEINFO@
+PACKAGE = @PACKAGE@
+PERL = @PERL@
+RANLIB = @RANLIB@
+RESID_INLINE = @RESID_INLINE@
+VERSION = @VERSION@
+
+lib_LIBRARIES = libmos6581.a
+
+libmos6581_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc pot.cc sample_PST.cc sample_PS_.cc sample_P_T.cc sample__ST.cc
+
+pkginclude_HEADERS = siddefs.h sid.h voice.h wave.h envelope.h filter.h pot.h
+
+noinst_DATA = data/sample_PST.freq0800 data/sample_PS_.freq1000 data/sample_P_T.freq0800 data/sample__ST.freq0800
+
+noinst_SCRIPTS = samp2src.pl
+
+EXTRA_DIST = $(noinst_DATA) $(noinst_SCRIPTS)
+mkinstalldirs = $(SHELL) $(top_srcdir)/mkinstalldirs
+CONFIG_CLEAN_FILES =  siddefs.h
+LIBRARIES =  $(lib_LIBRARIES)
+
+
+DEFS = @DEFS@ -I. -I$(srcdir) 
+CPPFLAGS = @CPPFLAGS@
+LDFLAGS = @LDFLAGS@
+LIBS = @LIBS@
+libmos6581_a_LIBADD = 
+libmos6581_a_OBJECTS =  sid.o voice.o wave.o envelope.o filter.o pot.o \
+sample_PST.o sample_PS_.o sample_P_T.o sample__ST.o
+AR = ar
+SCRIPTS =  $(noinst_SCRIPTS)
+
+CXXFLAGS = @CXXFLAGS@
+CXXCOMPILE = $(CXX) $(DEFS) $(INCLUDES) $(CPPFLAGS) $(CXXFLAGS)
+CXXLINK = $(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@
+DATA =  $(noinst_DATA)
+
+HEADERS =  $(pkginclude_HEADERS)
+
+DIST_COMMON =  Makefile.am Makefile.in siddefs.h.in
+
+
+DISTFILES = $(DIST_COMMON) $(SOURCES) $(HEADERS) $(TEXINFOS) $(EXTRA_DIST)
+
+TAR = tar
+GZIP = --best
+SOURCES = $(libmos6581_a_SOURCES)
+OBJECTS = $(libmos6581_a_OBJECTS)
+
+default: all
+
+.SUFFIXES:
+.SUFFIXES: .c .cc .o
+$(srcdir)/Makefile.in: Makefile.am $(top_srcdir)/configure.in $(ACLOCAL_M4) 
+	cd $(top_srcdir) && $(AUTOMAKE) --gnu --include-deps sid/Makefile
+
+Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
+	cd $(top_builddir) \
+	  && CONFIG_FILES=$(subdir)/$@ CONFIG_HEADERS= $(SHELL) ./config.status
+
+siddefs.h: $(top_builddir)/config.status siddefs.h.in
+	cd $(top_builddir) && CONFIG_FILES=$(subdir)/$@ CONFIG_HEADERS= ./config.status
+
+mostlyclean-libLIBRARIES:
+
+clean-libLIBRARIES:
+	test -z "$(lib_LIBRARIES)" || rm -f $(lib_LIBRARIES)
+
+distclean-libLIBRARIES:
+
+install-libLIBRARIES: $(lib_LIBRARIES)
+	@$(NORMAL_INSTALL)
+	$(mkinstalldirs) $(libdir)
+	list='$(lib_LIBRARIES)'; for p in $$list; do \
+	  if test -f $$p; then \
+	    echo " $(INSTALL_DATA) $$p $(libdir)/$$p"; \
+	    $(INSTALL_DATA) $$p $(libdir)/$$p; \
+	  else :; fi; \
+	done
+	@$(POST_INSTALL)
+	@list='$(lib_LIBRARIES)'; for p in $$list; do \
+	  if test -f $$p; then \
+	    echo " $(RANLIB) $(libdir)/$$p"; \
+	    $(RANLIB) $(libdir)/$$p; \
+	  else :; fi; \
+	done
+
+uninstall-libLIBRARIES:
+	$(NORMAL_UNINSTALL)
+	list='$(lib_LIBRARIES)'; for p in $$list; do \
+	  rm -f $(libdir)/$$p; \
+	done
+
+.c.o:
+	$(COMPILE) -c $<
+
+mostlyclean-compile:
+	rm -f *.o core
+
+clean-compile:
+
+distclean-compile:
+	rm -f *.tab.c
+
+maintainer-clean-compile:
+
+libmos6581.a: $(libmos6581_a_OBJECTS) $(libmos6581_a_DEPENDENCIES)
+	rm -f libmos6581.a
+	$(AR) cru libmos6581.a $(libmos6581_a_OBJECTS) $(libmos6581_a_LIBADD)
+	$(RANLIB) libmos6581.a
+.cc.o:
+	$(CXXCOMPILE) -c $<
+
+install-pkgincludeHEADERS: $(pkginclude_HEADERS)
+	@$(NORMAL_INSTALL)
+	$(mkinstalldirs) $(pkgincludedir)
+	@list='$(pkginclude_HEADERS)'; for p in $$list; do \
+	  echo " $(INSTALL_DATA) $(srcdir)/$$p $(pkgincludedir)/$$p"; \
+	  $(INSTALL_DATA) $(srcdir)/$$p $(pkgincludedir)/$$p; \
+	done
+
+uninstall-pkgincludeHEADERS:
+	$(NORMAL_UNINSTALL)
+	list='$(pkginclude_HEADERS)'; for p in $$list; do \
+	  rm -f $(pkgincludedir)/$$p; \
+	done
+
+tags: TAGS
+
+ID: $(HEADERS) $(SOURCES)
+	here=`pwd` && cd $(srcdir) && mkid -f$$here/ID $(SOURCES) $(HEADERS)
+
+TAGS:  $(HEADERS) $(SOURCES)  $(TAGS_DEPENDENCIES)
+	tags=; \
+	here=`pwd`; \
+	test -z "$(ETAGS_ARGS)$(SOURCES)$(HEADERS)$$tags" \
+	  || (cd $(srcdir) && etags $(ETAGS_ARGS) $$tags  $(SOURCES) $(HEADERS) -o $$here/TAGS)
+
+mostlyclean-tags:
+
+clean-tags:
+
+distclean-tags:
+	rm -f TAGS ID
+
+maintainer-clean-tags:
+
+distdir = $(top_builddir)/$(PACKAGE)-$(VERSION)/$(subdir)
+
+subdir = sid
+
+distdir: $(DISTFILES)
+	$(mkinstalldirs) $(distdir)/data
+	@for file in $(DISTFILES); do \
+	  d=$(srcdir); \
+	  test -f $(distdir)/$$file \
+	  || ln $$d/$$file $(distdir)/$$file 2> /dev/null \
+	  || cp -p $$d/$$file $(distdir)/$$file; \
+	done
+envelope.o envelope.lo: envelope.cc envelope.h siddefs.h
+filter.o filter.lo: filter.cc filter.h siddefs.h
+pot.o pot.lo: pot.cc pot.h siddefs.h
+sample_PST.o sample_PST.lo: sample_PST.cc wave.h siddefs.h
+sample_PS_.o sample_PS_.lo: sample_PS_.cc wave.h siddefs.h
+sample_P_T.o sample_P_T.lo: sample_P_T.cc wave.h siddefs.h
+sample__ST.o sample__ST.lo: sample__ST.cc wave.h siddefs.h
+sid.o sid.lo: sid.cc sid.h siddefs.h voice.h wave.h envelope.h filter.h \
+	pot.h
+voice.o voice.lo: voice.cc voice.h siddefs.h wave.h envelope.h
+wave.o wave.lo: wave.cc wave.h siddefs.h
+
+info:
+dvi:
+check: all
+	$(MAKE)
+installcheck:
+install-exec: install-libLIBRARIES
+	@$(NORMAL_INSTALL)
+
+install-data: install-pkgincludeHEADERS
+	@$(NORMAL_INSTALL)
+
+install: install-exec install-data all
+	@:
+
+uninstall: uninstall-libLIBRARIES uninstall-pkgincludeHEADERS
+
+all: Makefile $(LIBRARIES) $(SCRIPTS) $(DATA) $(HEADERS)
+
+install-strip:
+	$(MAKE) INSTALL_PROGRAM='$(INSTALL_PROGRAM) -s' INSTALL_SCRIPT='$(INSTALL_PROGRAM)' install
+installdirs:
+	$(mkinstalldirs)  $(libdir) $(pkgincludedir)
+
+
+mostlyclean-generic:
+	test -z "$(MOSTLYCLEANFILES)" || rm -f $(MOSTLYCLEANFILES)
+
+clean-generic:
+	test -z "$(CLEANFILES)" || rm -f $(CLEANFILES)
+
+distclean-generic:
+	rm -f Makefile $(DISTCLEANFILES)
+	rm -f config.cache config.log stamp-h stamp-h[0-9]*
+	test -z "$(CONFIG_CLEAN_FILES)" || rm -f $(CONFIG_CLEAN_FILES)
+
+maintainer-clean-generic:
+	test -z "$(MAINTAINERCLEANFILES)" || rm -f $(MAINTAINERCLEANFILES)
+	test -z "$(BUILT_SOURCES)" || rm -f $(BUILT_SOURCES)
+mostlyclean:  mostlyclean-libLIBRARIES mostlyclean-compile \
+		mostlyclean-tags mostlyclean-generic
+
+clean:  clean-libLIBRARIES clean-compile clean-tags clean-generic \
+		mostlyclean
+
+distclean:  distclean-libLIBRARIES distclean-compile distclean-tags \
+		distclean-generic clean
+	rm -f config.status
+
+maintainer-clean:  maintainer-clean-libLIBRARIES \
+		maintainer-clean-compile maintainer-clean-tags \
+		maintainer-clean-generic distclean
+	@echo "This command is intended for maintainers to use;"
+	@echo "it deletes files that may require special tools to rebuild."
+
+.PHONY: default mostlyclean-libLIBRARIES distclean-libLIBRARIES \
+clean-libLIBRARIES maintainer-clean-libLIBRARIES uninstall-libLIBRARIES \
+install-libLIBRARIES mostlyclean-compile distclean-compile \
+clean-compile maintainer-clean-compile uninstall-pkgincludeHEADERS \
+install-pkgincludeHEADERS tags mostlyclean-tags distclean-tags \
+clean-tags maintainer-clean-tags distdir info dvi installcheck \
+install-exec install-data install uninstall all installdirs \
+mostlyclean-generic distclean-generic clean-generic \
+maintainer-clean-generic clean mostlyclean distclean maintainer-clean
+
+
+sample_PST.cc : data/sample_PST.freq0800
+	$(PERL) ./samp2src.pl $* $< $@
+sample_PS_.cc : data/sample_PS_.freq1000
+	$(PERL) ./samp2src.pl $* $< $@
+sample_P_T.cc : data/sample_P_T.freq0800
+	$(PERL) ./samp2src.pl $* $< $@
+sample__ST.cc : data/sample__ST.freq0800
+	$(PERL) ./samp2src.pl $* $< $@
+
+maintainer-clean-libLIBRARIES:
+	rm -f sample_PST.cc sample_PS_.cc sample_P_T.cc sample__ST.cc
+
+# Tell versions [3.59,3.63) of GNU make to not export all variables.
+# Otherwise a system limit (for SysV at least) may be exceeded.
+.NOEXPORT:

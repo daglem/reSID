@@ -1,0 +1,4044 @@
+diff -ruN vice-0.14.2/src/6581.cc vice-0.14.2-resid/src/6581.cc
+--- vice-0.14.2/src/6581.cc	Thu Jan  1 01:00:00 1970
++++ vice-0.14.2-resid/src/6581.cc	Sun Jun  7 18:43:58 1998
+@@ -0,0 +1,1904 @@
++/*
++ * 6581.cc - MOS6581 (SID) emulation.
++ *
++ * Note: This is an experimental C64 only version of sid.c, using
++ * the reSID library to emulate MOS6581.
++ *
++ * Written by
++ *  Teemu Rantanen (tvr@cs.hut.fi)
++ *  Michael Schwendt (sidplay@geocities.com)
++ *
++ * AIX support added by
++ *  Chris Sharp (sharpc@hursley.ibm.com)
++ *
++ * reSID integration by
++ *  Dag Lem (resid@nimrod.no)
++ *
++ * This file is part of VICE, the Versatile Commodore Emulator.
++ * See README for copyright notice.
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program; if not, write to the Free Software
++ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
++ *  02111-1307  USA.
++ *
++ */
++
++#include "resid/sid.h"
++
++extern "C" {
++
++#include "vice.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/time.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <errno.h>
++#include <math.h>
++
++#if defined(HAVE_SYS_IOCTL_H) && !defined(__MSDOS__)
++#ifdef __hpux
++#define _INCLUDE_HPUX_SOURCE
++#endif
++#include <sys/ioctl.h>
++#endif
++
++#ifndef HAVE_USLEEP
++extern int usleep(unsigned long);
++#endif
++
++#include "vmachine.h"
++#include "types.h"
++#include "mem.h"
++#include "ui.h"
++#include "interrupt.h"
++#include "warn.h"
++#include "sid.h"
++#include "vsync.h"
++#include "resources.h"
++#include "utils.h"
++
++#ifdef SID
++#undef SID
++#endif
++
++/* needed datatypes */
++typedef unsigned int u32_t;
++typedef int s32_t;
++typedef unsigned short u16_t;
++typedef short s16_t;
++typedef unsigned char u8_t;
++
++
++static SID sid;
++
++/* needed data for SID */
++typedef struct sound_s
++{
++    /* pointer to the sample data that is generated when SID runs */
++    s16_t		*pbuf;
++    /* offset of next sample being generated */
++    s32_t		 bufptr;
++
++    /* internal constant used for sample rate dependent calculations */
++    u32_t		 speed1;
++
++    /* warnings */
++    warn_t		*pwarn;
++
++    /* do we have a new sid or an old one? */
++    BYTE		 newsid;
++    /* constants needed to implement write-only register reads */
++    BYTE		 laststore;
++    BYTE		 laststorebit;
++    CLOCK		 laststoreclk;
++} sound_t;
++
++
++/* clockcycles for each dropping bit when write-only register read is done */
++static u32_t sidreadclocks[9];
++
++
++/* SID initialization routine */
++static void init_sid(sound_t *psid, s16_t *pbuf, int speed)
++{
++    u32_t		 i;
++    char		*name;
++
++    psid->speed1 = (CYCLES_PER_SEC << 8) / speed;
++
++    psid->pbuf = pbuf;
++    psid->bufptr = 0;
++
++    name = "SID";
++
++    if (!psid->pwarn)
++	psid->pwarn = warn_init(name, 32);
++    else
++	warn_reset(psid->pwarn);
++
++    sid.filter.bypass = !app_resources.sidFilters;
++    psid->newsid = app_resources.sidModel;
++
++    for (i = 0; i < 9; i++)
++	sidreadclocks[i] = 13;
++}
++
++
++
++/*
++ * devices
++ */
++typedef struct
++{
++    /* name of the device or NULL */
++    char			 *name;
++    /* init -routine to be called at device initialization. Should use
++       suggested values if possible or return new values if they cannot be
++       used */
++    int				(*init)(sound_t *s, char *device, int *speed,
++					int *fragsize, int *fragnr,
++					double bufsize);
++    /* send number of bytes to the soundcard. it is assumed to block if kernel
++       buffer is full */
++    int				(*write)(sound_t *s, s16_t *pbuf, int nr);
++    /* dump-routine to be called for every write to SID */
++    int				(*dump)(ADDRESS addr, BYTE byte, CLOCK clks);
++    /* flush-routine to be called every frame */
++    int				(*flush)(sound_t *s);
++    /* return number of samples unplayed in the kernel buffer at the moment */
++    int				(*bufferstatus)(sound_t *s, int first);
++    /* close and cleanup device */
++    void			(*close)();
++    /* suspend device */
++    int				(*suspend)(sound_t *s);
++    /* resume device */
++    int				(*resume)(sound_t *s);
++} sid_device_t;
++
++#define FRAGS_PER_SECOND ((int)RFSH_PER_SEC)
++
++/*
++ * fs-device
++ */
++static FILE *fs_fd = NULL;
++
++static int fs_init(sound_t *s, char *param, int *speed,
++		   int *fragsize, int *fragnr, double bufsize)
++{
++    if (!param)
++	param = "vicesnd.raw";
++    fs_fd = fopen(param, "w");
++    if (!fs_fd)
++	return 1;
++    return 0;
++}
++
++static int fs_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int			i;
++    i = fwrite(pbuf, sizeof(s16_t), nr, fs_fd);
++    if (i != nr)
++	return 1;
++    return 0;
++}
++
++static void fs_close()
++{
++    fclose(fs_fd);
++    fs_fd = NULL;
++}
++
++static sid_device_t fs_device =
++{
++    "fs",
++    fs_init,
++    fs_write,
++    NULL,
++    NULL,
++    NULL,
++    fs_close,
++    NULL,
++    NULL
++};
++
++
++/*
++ * dummy device to get all the benefits of running sid
++ */
++static sid_device_t dummy_device =
++{
++    "dummy",
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL
++};
++
++/*
++ * Another dummy device to measure speed (this calculates samples)
++ */
++static int speed_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    return 0;
++}
++
++static sid_device_t speed_device =
++{
++    "speed",
++    NULL,
++    speed_write,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL,
++    NULL
++};
++
++
++/*
++ * dump device to dump all writes to file for further examination
++ */
++static FILE *dump_fd = NULL;
++
++static int dump_init(sound_t *s, char *param, int *speed,
++		     int *fragsize, int *fragnr, double bufsize)
++{
++    if (!param)
++	param = "vicesnd.sid";
++    dump_fd = fopen(param, "w");
++    if (!dump_fd)
++	return 1;
++    return 0;
++}
++
++static int dump_dump(ADDRESS addr, BYTE byte, CLOCK clks)
++{
++    int				i;
++    i = fprintf(dump_fd, "%d %d %d\n", (int)clks, addr, byte);
++    if (i < 0)
++	return 1;
++    return 0;
++}
++
++static int dump_flush(sound_t *s)
++{
++    int				i;
++    i = fflush(dump_fd);
++    return i;
++}
++
++static void dump_close()
++{
++    fclose(dump_fd);
++    dump_fd = NULL;
++}
++
++static sid_device_t dump_device =
++{
++    "dump",
++    dump_init,
++    NULL,
++    dump_dump,
++    dump_flush,
++    NULL,
++    dump_close,
++    NULL,
++    NULL
++};
++
++
++/*
++ * timer device to emulate fragmented blocking device behaviour
++ */
++
++#ifdef TESTDEVICE
++
++static long test_time_zero = 0;
++static long test_time_fragment = 0;
++static int test_time_written = 0;
++static int test_time_fragsize = 0;
++static int test_time_nrfrags = 0;
++
++static long test_now()
++{
++    struct timeval tp;
++    gettimeofday(&tp, NULL);
++    return tp.tv_sec*1000000 + tp.tv_usec;
++}
++
++static int test_bufferstatus(sound_t *s, int first);
++
++
++static int test_init(sound_t *s, char *param, int *speed,
++		     int *fragsize, int *fragnr, double bufsize)
++{
++    test_time_zero = test_now();
++    test_time_fragment = 1000000.0 / ((double)*speed / *fragsize);
++    test_time_written = 0;
++    test_time_fragsize = *fragsize;
++    test_time_nrfrags = *fragnr;
++    return 0;
++}
++
++static int test_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    (void)test_bufferstatus(s, 0);
++    test_time_written += nr / test_time_fragsize;
++    while (test_bufferstatus(s, 0) > test_time_nrfrags*test_time_fragsize)
++	usleep(1000000 / (4 * (int)RFSH_PER_SEC));
++    return 0;
++}
++
++static int test_bufferstatus(sound_t *s, int first)
++{
++    int			ret;
++    long		now = test_now();
++    ret = test_time_written - (now - test_time_zero) / test_time_fragment;
++    if (ret < 0)
++    {
++	warn(s->pwarn, -1, "virtual soundbuffer empty");
++	test_time_zero = now;
++	test_time_written = 0;
++	return 0;
++    }
++    return ret*test_time_fragsize;
++}
++
++static sid_device_t test_device =
++{
++    "test",
++    test_init,
++    test_write,
++    NULL,
++    NULL,
++    test_bufferstatus,
++    NULL,
++    NULL,
++    NULL
++};
++#else /* TESTDEVICE */
++static sid_device_t test_device;
++#endif
++
++/*
++ * linux/freebsd -device
++ */
++#if defined(HAVE_LINUX_SOUNDCARD_H) || defined(HAVE_MACHINE_SOUNDCARD_H)
++#if defined(HAVE_LINUX_SOUNDCARD_H)
++#include <linux/soundcard.h>
++#endif
++#if defined(HAVE_MACHINE_SOUNDCARD_H)
++#include <machine/soundcard.h>
++#endif
++
++static int uss_fd = -1;
++static int uss_8bit = 0;
++static int uss_bufsize = 0;
++static int uss_fragsize = 0;
++
++static int uss_bufferstatus(sound_t *s, int first);
++
++static int uss_init(sound_t *s, char *param, int *speed,
++		    int *fragsize, int *fragnr, double bufsize)
++{
++    int			 st, tmp, orig;
++    if (!param)
++	param = "/dev/dsp";
++    uss_fd = open(param, O_WRONLY, 0777);
++    if (uss_fd < 0)
++    {
++	warn(s->pwarn, -1, "cannot open '%s' for writing", param);
++	return 1;
++    }
++    /* samplesize 16 bits */
++#ifdef WORDS_BIGENDIAN
++    orig = tmp = AFMT_S16_BE;
++#else
++    orig = tmp = AFMT_S16_LE;
++#endif
++    st = ioctl(uss_fd, SNDCTL_DSP_SETFMT, &tmp);
++    if (st < 0 || orig != tmp || getenv("USS8BIT"))
++    {
++	/* samplesize 8 bits */
++	orig = tmp = AFMT_U8;
++	st = ioctl(uss_fd, SNDCTL_DSP_SETFMT, &tmp);
++	if (st < 0 || orig != tmp)
++	{
++	    warn(s->pwarn, -1, "SNDCTL_DSP_SETFMT failed");
++	    goto fail;
++	}
++	warn(s->pwarn, -1, "playing 8bit sample");
++	uss_8bit = 1;
++    }
++    /* no stereo */
++    tmp = 0;
++    st = ioctl(uss_fd, SNDCTL_DSP_STEREO, &tmp);
++    if (st < 0 || tmp != 0)
++    {
++	warn(s->pwarn, -1, "SNDCTL_DSP_STEREO failed");
++	goto fail;
++    }
++    /* speed */
++    tmp = *speed;
++    st = ioctl(uss_fd, SNDCTL_DSP_SPEED, &tmp);
++    if (st < 0 || tmp <= 0)
++    {
++	warn(s->pwarn, -1, "SNDCTL_DSP_SPEED failed");
++	goto fail;
++    }
++    *speed = tmp;
++    /* fragments */
++    for (tmp = 1; 1 << tmp < *fragsize; tmp++);
++    orig = tmp = tmp + (*fragnr << 16) + !uss_8bit;
++    st = ioctl(uss_fd, SNDCTL_DSP_SETFRAGMENT, &tmp);
++    if (st < 0 || (tmp^orig)&0xffff)
++    {
++	warn(s->pwarn, -1, "SNDCTL_DSP_SETFRAGMENT failed");
++	goto fail;
++    }
++    if (tmp != orig)
++    {
++	if (tmp >> 16 > *fragnr)
++	{
++	    warn(s->pwarn, -1, "SNDCTL_DSP_SETFRAGMENT: too many fragments");
++	    goto fail;
++	}
++	*fragnr = tmp >> 16;
++	if (*fragnr < 3)
++	{
++	    warn(s->pwarn, -1, "SNDCTL_DSP_SETFRAGMENT: too few fragments");
++	    goto fail;
++	}
++    }
++    uss_bufsize = (*fragsize)*(*fragnr);
++    uss_fragsize = *fragsize;
++    return 0;
++fail:
++    close(uss_fd);
++    uss_fd = -1;
++    uss_8bit = 0;
++    uss_bufsize = 0;
++    uss_fragsize = 0;
++    return 1;
++}
++
++static int uss_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int			total, i, now;
++    if (uss_8bit)
++    {
++	/* XXX: ugly to change contents of the buffer */
++	for (i = 0; i < nr; i++)
++	    ((char *)pbuf)[i] = pbuf[i]/256 + 128;
++	total = nr;
++    }
++    else
++	total = nr*sizeof(s16_t);
++    for (i = 0; i < total; i += now)
++    {
++	now = write(uss_fd, (char *)pbuf + i, total - i);
++	if (now <= 0)
++	{
++	    if (now < 0)
++		perror("uss_write");
++	    return 1;
++	}
++    }
++    return 0;
++}
++
++static int uss_bufferstatus(sound_t *s, int first)
++{
++    audio_buf_info		info;
++    int				st, ret;
++
++    st = ioctl(uss_fd, SNDCTL_DSP_GETOSPACE, &info);
++    if (st < 0)
++    {
++	warn(s->pwarn, -1, "SNDCTL_DSP_GETOSPACE failed");
++	return -1;
++    }
++    ret = info.fragments*info.fragsize;
++    if (ret != info.bytes)
++    {
++	warn(s->pwarn, 11, "GETOSPACE: ret(%d)!=bytes(%d)", ret, info.bytes);
++	ret = info.bytes;
++    }
++    if (ret < 0)
++    {
++        warn(s->pwarn, 12, "GETOSPACE: bytes < 0");
++	ret = 0;
++    }
++    if (!uss_8bit)
++	ret /= sizeof(s16_t);
++    if (ret > uss_bufsize)
++    {
++	warn(s->pwarn, 13, "GETOSPACE: bytes > bufsize");
++	ret = uss_bufsize;
++    }
++#if defined(linux)
++    /*
++     * GETOSPACE before first write returns random value (or actually the
++     * value on which the device was when it was closed last time). I hope
++     * this has been fixed after 'Sound Driver:3.5-beta2-960210'
++     */
++    if (first && !ret)
++    {
++	ret = 1;
++	warn(s->pwarn, -1, "SNDCTL_DSP_GETOSPACE not reliable after open()");
++    }
++#endif
++    return ret;
++}
++
++static void uss_close()
++{
++    close(uss_fd);
++    uss_fd = -1;
++    uss_8bit = 0;
++    uss_bufsize = 0;
++    uss_fragsize = 0;
++}
++
++static int uss_suspend(sound_t *s)
++{
++    int			 st;
++    st = ioctl(uss_fd, SNDCTL_DSP_POST, NULL);
++    if (st < 0)
++    {
++	warn(s->pwarn, -1, "SNDCTL_DSP_POST failed");
++	return 1;
++    }
++    return 0;
++}
++
++static sid_device_t uss_device =
++{
++    "uss",
++    uss_init,
++    uss_write,
++    NULL,
++    NULL,
++    uss_bufferstatus,
++    uss_close,
++    uss_suspend,
++    NULL
++};
++
++#else
++static sid_device_t uss_device;
++#endif
++
++
++/*
++ * sgi sound device
++ */
++#if defined(sgi) && defined(HAVE_DMEDIA_AUDIO_H)
++#include <dmedia/audio.h>
++#if defined(HAVE_BSTRING_H)
++#include <bstring.h>
++#endif
++
++static ALconfig    sgi_audioconfig = NULL;
++static ALport      sgi_audioport = NULL;
++
++static void sgi_errorhandler(long err, const char *msg, ...)
++{
++    printf("sgierrorhandler: %d, %s\n", (int)err, msg);
++}
++
++static int sgi_init(sound_t *s, char *param, int *speed,
++		    int *fragsize, int *fragnr, double bufsize)
++{
++    long	chpars[] = {AL_OUTPUT_RATE, 0};
++    int		st;
++
++    ALseterrorhandler(sgi_errorhandler);
++    chpars[1] = *speed;
++    st = ALsetparams(AL_DEFAULT_DEVICE, chpars, 2);
++    if (st < 0)
++	return 1;
++    st = ALgetparams(AL_DEFAULT_DEVICE, chpars, 2);
++    if (st < 0)
++	return 1;
++    *speed = chpars[1];
++
++    sgi_audioconfig = ALnewconfig();
++    if (!sgi_audioconfig)
++	return 1;
++    st = ALsetchannels(sgi_audioconfig, AL_MONO);
++    if (st < 0)
++	goto fail;
++    st = ALsetwidth(sgi_audioconfig, AL_SAMPLE_16);
++    if (st < 0)
++	goto fail;
++    st = ALsetqueuesize(sgi_audioconfig, *fragsize * *fragnr);
++    if (st < 0)
++        goto fail;
++    sgi_audioport = ALopenport("outport", "w", sgi_audioconfig);
++    if (!sgi_audioport)
++	goto fail;
++    return 0;
++fail:
++    ALfreeconfig(sgi_audioconfig);
++    sgi_audioconfig = NULL;
++    return 1;
++}
++
++static int sgi_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int				i;
++    i = ALwritesamps(sgi_audioport, pbuf, nr);
++    if (i < 0)
++	return 1;
++    return 0;
++}
++
++static int sgi_bufferstatus(sound_t *s, int first)
++{
++    int				i;
++    i = ALgetfilled(sgi_audioport);
++    return i;
++}
++
++static void sgi_close()
++{
++    /* XXX: code missing */
++    ALfreeconfig(sgi_audioconfig);
++    sgi_audioconfig = NULL;
++}
++
++static sid_device_t sgi_device =
++{
++    "sgi",
++    sgi_init,
++    sgi_write,
++    NULL,
++    NULL,
++    sgi_bufferstatus,
++    sgi_close,
++    NULL,
++    NULL
++};
++
++#else
++static sid_device_t sgi_device;
++#endif
++
++
++/*
++ * Solaris (untested and unfinished)
++ */
++#if defined(sun) && defined(HAVE_SYS_AUDIOIO_H)
++#include <sys/audioio.h>
++
++static int sun_bufferstatus(sound_t *s, int first);
++
++static int sun_fd = -1;
++static int sun_8bit = 0;
++static int sun_bufsize = 0;
++static int sun_written = 0;
++
++static int toulaw8(s16_t data)
++{
++    int			v, s, a;
++
++    a = data / 8;
++
++    v = (a < 0 ? -a : a);
++    s = (a < 0 ? 0 : 0x80);
++
++    if (v >= 4080)
++        a = 0;
++    else if (v >= 2032)
++        a = 0x0f - (v - 2032) / 128;
++    else if (v >= 1008)
++        a = 0x1f - (v - 1008) / 64;
++    else if (v >= 496)
++        a = 0x2f - (v - 496) / 32;
++    else if (v >= 240)
++        a = 0x3f - (v - 240) / 16;
++    else if (v >= 112)
++        a = 0x4f - (v - 112) / 8;
++    else if (v >= 48)
++        a = 0x5f - (v - 48) / 4;
++    else if (v >= 16)
++        a = 0x6f - (v - 16) / 2;
++    else
++        a = 0x7f - v;
++
++    a |= s;
++
++    return a;
++}
++
++
++static int sun_init(sound_t *s, char *param, int *speed,
++		    int *fragsize, int *fragnr, double bufsize)
++{
++    int			st;
++    struct audio_info	info;
++
++    if (!param)
++	param = "/dev/audio";
++    sun_fd = open(param, O_WRONLY, 0777);
++    if (sun_fd < 0)
++	return 1;
++    AUDIO_INITINFO(&info);
++    info.play.sample_rate = *speed;
++    info.play.channels = 1;
++    info.play.precision = 16;
++    info.play.encoding = AUDIO_ENCODING_LINEAR;
++    st = ioctl(sun_fd, AUDIO_SETINFO, &info);
++    if (st < 0)
++    {
++	AUDIO_INITINFO(&info);
++	info.play.sample_rate = 8000;
++	info.play.channels = 1;
++	info.play.precision = 8;
++	info.play.encoding = AUDIO_ENCODING_ULAW;
++	st = ioctl(sun_fd, AUDIO_SETINFO, &info);
++	if (st < 0)
++	    goto fail;
++	sun_8bit = 1;
++	*speed = 8000;
++	warn(s->pwarn, -1, "playing 8 bit ulaw at 8000Hz");
++    }
++    sun_bufsize = (*fragsize)*(*fragnr);
++    sun_written = 0;
++    return 0;
++fail:
++    close(sun_fd);
++    sun_fd = -1;
++    return 1;
++}
++
++static int sun_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int			total, i, now;
++    if (sun_8bit)
++    {
++	/* XXX: ugly to change contents of the buffer */
++	for (i = 0; i < nr; i++)
++	    ((char *)pbuf)[i] = toulaw8(pbuf[i]);
++	total = nr;
++    }
++    else
++	total = nr*sizeof(s16_t);
++    for (i = 0; i < total; i += now)
++    {
++	now = write(sun_fd, (char *)pbuf + i, total - i);
++	if (now <= 0)
++	    return 1;
++    }
++    sun_written += nr;
++    /* XXX: correct? */
++    while (sun_bufferstatus(s, 0) > sun_bufsize)
++	usleep(1000000 / (4 * (int)RFSH_PER_SEC));
++    return 0;
++}
++
++static int sun_bufferstatus(sound_t *s, int first)
++{
++    int			st;
++    struct audio_info	info;
++    st = ioctl(sun_fd, AUDIO_GETINFO, &info);
++    if (st < 0)
++	return -1;
++    /* XXX: is samples reliable? eof? */
++    return sun_written - info.play.samples;
++}
++
++static void sun_close()
++{
++    close(sun_fd);
++    sun_fd = -1;
++    sun_8bit = 0;
++    sun_bufsize = 0;
++    sun_written = 0;
++}
++
++
++static sid_device_t sun_device =
++{
++    "sun",
++    sun_init,
++    sun_write,
++    NULL,
++    NULL,
++    sun_bufferstatus,
++    sun_close,
++    NULL,
++    NULL
++};
++
++#else
++static sid_device_t sun_device;
++#endif
++
++
++#if defined(HAVE_LIBUMSOBJ) && defined(HAVE_UMS_UMSAUDIODEVICE_H) && defined(HAVE_UMS_UMSBAUDDEVICE_H)
++
++/* AIX -support by Chris Sharp (sharpc@hursley.ibm.com) */
++
++#include <UMS/UMSAudioDevice.h>
++#include <UMS/UMSBAUDDevice.h>
++
++/* XXX: AIX: can these be made static and use aix_ -prefix on these? */
++UMSAudioDeviceMClass audio_device_class;
++UMSAudioDevice_ReturnCode rc;
++UMSBAUDDevice audio_device;
++Environment *ev;
++UMSAudioTypes_Buffer buffer;
++UMSAudioDeviceMClass_ErrorCode audio_device_class_error;
++char* error_string;
++char* audio_formats_alias;
++char* audio_inputs_alias;
++char* audio_outputs_alias;
++char* obyte_order;
++long out_rate;
++long left_gain, right_gain;
++
++
++static int aix_init(sound_t *s, char *param, int *speed,
++		     int *fragsize, int *fragnr, double bufsize)
++{
++    int	st, tmp, i;
++    /* open device */
++    ev = somGetGlobalEnvironment();
++    audio_device = UMSBAUDDeviceNew();
++    rc = UMSAudioDevice_open(audio_device, ev, "/dev/paud0", "PLAY",
++			     UMSAudioDevice_BlockingIO);
++    if (audio_device == NULL)
++    {
++    	fprintf(stderr,"can't create audio device object\nError: %s\n",
++		error_string);
++	return 1;
++    }
++
++    rc = UMSAudioDevice_set_volume(audio_device, ev, 100);
++    rc = UMSAudioDevice_set_balance(audio_device, ev, 0);
++
++    rc = UMSAudioDevice_set_time_format(audio_device, ev, UMSAudioTypes_Msecs);
++
++    if (obyte_order)
++        free(obyte_order);
++    rc = UMSAudioDevice_set_byte_order(audio_device, ev, "LSB");
++
++    /* set 16bit */
++    rc = UMSAudioDevice_set_bits_per_sample(audio_device, ev, 16);
++    rc = UMSAudioDevice_set_audio_format_type(audio_device, ev, "PCM");
++    rc = UMSAudioDevice_set_number_format(audio_device, ev, "TWOS_COMPLEMENT");
++
++    /* set speed */
++    rc = UMSAudioDevice_set_sample_rate(audio_device, ev, *speed, &out_rate);
++
++    /* channels */
++    rc = UMSAudioDevice_set_number_of_channels(audio_device, ev, 1);
++
++    /* should we use the default? */
++    left_gain = right_gain = 100;
++    rc = UMSAudioDevice_enable_output(audio_device, ev, "LINE_OUT",
++				      &left_gain, &right_gain);
++
++    /* set buffer size */
++    tmp = (*fragsize)*(*fragnr)*sizeof(s16_t);
++    buffer._maximum = tmp;
++    buffer._buffer  = (char *) xmalloc(tmp);
++    buffer._length = 0;
++
++
++    rc = UMSAudioDevice_initialize(audio_device, ev);
++    rc = UMSAudioDevice_start(audio_device, ev);
++
++    return 0;
++#if 0
++    /* XXX: AIX: everything should check rc, this isn't used now */
++fail:
++    UMSAudioDevice_stop(audio_device, ev);
++    UMSAudioDevice_close(audio_device, ev);
++    _somFree(audio_device);
++    free(buffer._buffer);
++    audio_device = NULL;
++
++    return 1;
++#endif
++}
++
++static int aix_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int	total, i, now;
++    long samples_written;
++
++    total = nr*sizeof(s16_t);
++    buffer._length = total;
++    memcpy(buffer._buffer,pbuf,total);
++    rc = UMSAudioDevice_write(audio_device, ev, &buffer, total,
++			      &samples_written);
++    return 0;
++}
++
++static int aix_bufferstatus(sound_t *s, int first)
++{
++    int i = -1;
++    rc = UMSAudioDevice_write_buff_remain(audio_device, ev, &i);
++    if (i < 0)
++      return -1;
++    /* fprintf(stderr,"Audio Buffer remains: %d\n blocks",i); */
++    return i/sizeof(s16_t);
++}
++
++static void aix_close()
++{
++    rc = UMSAudioDevice_play_remaining_data(audio_device, ev, TRUE);
++    UMSAudioDevice_stop(audio_device, ev);
++    UMSAudioDevice_close(audio_device, ev);
++    _somFree(audio_device);
++    free(buffer._buffer);
++    audio_device = NULL;
++}
++
++
++static sid_device_t aix_device =
++{
++    "aix",
++    aix_init,
++    aix_write,
++    NULL,
++    NULL,
++    aix_bufferstatus,
++    aix_close,
++    NULL,
++    NULL
++};
++
++#else
++static sid_device_t aix_device;
++#endif
++
++#if defined(__hpux) && defined(HAVE_SYS_AUDIO_H)
++#include <sys/audio.h>
++
++static int hpux_fd = -1;
++
++static int hpux_init(sound_t *s, char *param, int *speed,
++		     int *fragsize, int *fragnr, double bufsize)
++{
++    int				st, tmp, i;
++    if (!param)
++	param = "/dev/audio";
++    /* open device */
++    hpux_fd = open(param, O_WRONLY, 0777);
++    if (hpux_fd < 0)
++	return 1;
++    /* set 16bit */
++    st = ioctl(hpux_fd, AUDIO_SET_DATA_FORMAT, AUDIO_FORMAT_LINEAR16BIT);
++    if (st < 0)
++	goto fail;
++    /* set speed */
++    st = ioctl(hpux_fd, AUDIO_SET_SAMPLE_RATE, *speed);
++    if (st < 0)
++	goto fail;
++    /* channels */
++    st = ioctl(hpux_fd, AUDIO_SET_CHANNELS, 1);
++    if (st < 0)
++	goto fail;
++    /* should we use the default? */
++    st = ioctl(hpux_fd, AUDIO_SET_OUTPUT, AUDIO_OUT_SPEAKER);
++    if (st < 0)
++	goto fail;
++    /* set buffer size */
++    tmp = (*fragsize)*(*fragnr)*sizeof(s16_t);
++    st = ioctl(hpux_fd, AUDIO_SET_TXBUFSIZE, tmp);
++    if (st < 0)
++    {
++	/* XXX: what are valid buffersizes? */
++	for (i = 1; i < tmp; i *= 2);
++	tmp = i;
++	st = ioctl(hpux_fd, AUDIO_SET_TXBUFSIZE, tmp);
++	if (st < 0)
++	    goto fail;
++	*fragnr = tmp / ((*fragsize)*sizeof(s16_t));
++    }
++    return 0;
++fail:
++    close(hpux_fd);
++    hpux_fd = -1;
++    return 1;
++}
++
++static int hpux_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int			total, i, now;
++    total = nr*sizeof(s16_t);
++    for (i = 0; i < total; i += now)
++    {
++	now = write(hpux_fd, (char *)pbuf + i, total - i);
++	if (now <= 0)
++	    return 1;
++    }
++    return 0;
++}
++
++static int hpux_bufferstatus(sound_t *s, int first)
++{
++    int				st;
++    struct audio_status		ast;
++    st = ioctl(hpux_fd, AUDIO_GET_STATUS, &ast);
++    if (st < 0)
++	return -1;
++    return ast.transmit_buffer_count / sizeof(s16_t);
++}
++
++static void hpux_close()
++{
++    close(hpux_fd);
++    hpux_fd = -1;
++}
++
++
++static sid_device_t hpux_device =
++{
++    "hpux",
++    hpux_init,
++    hpux_write,
++    NULL,
++    NULL,
++    hpux_bufferstatus,
++    hpux_close,
++    NULL,
++    NULL
++};
++
++#else
++static sid_device_t hpux_device;
++#endif
++
++#ifdef __MSDOS__
++
++/*
++ * MIDAS
++ */
++
++#include "vmidas.h"
++
++static int midas_bufferstatus(sound_t *s, int first);
++
++static MIDASstreamHandle midas_stream = NULL;
++static int midas_bufsize = -1;
++static int midas_maxsize = -1;
++
++static int midas_init(sound_t *s, char *param, int *speed,
++		      int *fragsize, int *fragnr, double bufsize)
++{
++    BOOL		st;
++
++    st = vmidas_startup();
++    if (st != TRUE)
++	return 1;
++    st = MIDASsetOption(MIDAS_OPTION_MIXRATE, *speed);
++    if (st != TRUE)
++	return 1;
++    st = MIDASsetOption(MIDAS_OPTION_MIXING_MODE, MIDAS_MIX_NORMAL_QUALITY);
++    if (st != TRUE)
++	return 1;
++    st = MIDASsetOption(MIDAS_OPTION_OUTPUTMODE, MIDAS_MODE_16BIT_MONO);
++    if (st != TRUE)
++	return 1;
++    st = MIDASsetOption(MIDAS_OPTION_MIXBUFLEN,
++			(*fragsize)*(*fragnr)*sizeof(s16_t));
++    if (st != TRUE)
++	return 1;
++    st = MIDASsetOption(MIDAS_OPTION_MIXBUFBLOCKS, *fragnr);
++    if (st != TRUE)
++	return 1;
++#ifdef __MSDOS__
++#if 0
++    st = MIDASconfig();
++    if (st != TRUE)
++	return 1;
++#endif
++#endif
++    st = vmidas_init();
++    if (st != TRUE)
++	return 1;
++    st = MIDASopenChannels(1);
++    if (st != TRUE)
++    {
++	/* st = MIDASclose(); */
++	return 1;
++    }
++    midas_stream = MIDASplayStreamPolling(MIDAS_SAMPLE_16BIT_MONO, *speed,
++					  (int)(bufsize*1000));
++    if (!midas_stream)
++    {
++	st = MIDAScloseChannels();
++	/* st = MIDASclose(); */
++	return 1;
++    }
++    midas_bufsize = (*fragsize)*(*fragnr);
++    midas_maxsize = midas_bufsize / 2;
++    return 0;
++}
++
++static int midas_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    BOOL		st = 1;
++    unsigned int	ist;
++
++    ist = MIDASfeedStreamData(midas_stream, (unsigned char *)pbuf,
++			      nr*sizeof(s16_t), TRUE);
++    if (ist != nr*sizeof(s16_t))
++	return 1;
++#ifndef __MSDOS__
++    st = MIDASpoll();
++#endif
++    return !st;
++}
++
++static int midas_bufferstatus(sound_t *s, int first)
++{
++    int			nr;
++    if (first)
++	return 0;
++    nr = MIDASgetStreamBytesBuffered(midas_stream);
++    if (nr < 0)
++	nr = 0;
++    nr /= sizeof(s16_t);
++    if (nr > midas_maxsize)
++	midas_maxsize = nr;
++    return (int)((double)nr/midas_maxsize*midas_bufsize);
++}
++
++static void midas_close()
++{
++    BOOL		st;
++
++    /* XXX: we might come here from `atexit', so MIDAS might have been shut
++       down already.  This is a dirty kludge, we should find a cleaner way to
++       do it. */
++    if (vmidas_available())
++    {
++	st = MIDASstopStream(midas_stream);
++	st = MIDAScloseChannels();
++	/* st = MIDASclose(); */
++    }
++    midas_stream = NULL;
++    midas_bufsize = -1;
++    midas_maxsize = -1;
++}
++
++static sid_device_t midas_device =
++{
++    "midas",
++    midas_init,
++    midas_write,
++    NULL,
++    NULL,
++    midas_bufferstatus,
++    midas_close,
++    NULL,
++    NULL
++};
++#else
++static sid_device_t midas_device;
++#endif
++
++
++#if defined(HAVE_SDL_AUDIO_H) && defined(HAVE_SDL_SLEEP_H)
++#include "SDL_audio.h"
++#include "SDL_sleep.h"
++
++static s16_t *sdl_buf = NULL;
++static const SDL_AudioSpec *sdl_spec = NULL;
++static volatile int sdl_inptr = 0;
++static volatile int sdl_outptr = 0;
++static volatile int sdl_len = 0;
++
++static void sdl_callback(void *userdata, Uint8 *stream, Uint16 len,
++			 Uint8 *lookahead)
++{
++    int			amount, total;
++    total = 0;
++    while (total < len/sizeof(s16_t))
++    {
++	amount = sdl_inptr - sdl_outptr;
++	if (amount < 0)
++	    amount = sdl_len - sdl_outptr;
++	if (amount + total > len/sizeof(s16_t))
++	    amount = len/sizeof(s16_t) - total;
++	if (!amount)
++	{
++	    if (!sdl_spec)
++	    {
++		memset(stream + total*sizeof(s16_t), 0,
++		       len - total*sizeof(s16_t));
++		return;
++	    }
++	    Sleep(5);
++	    continue;
++	}
++	memcpy(stream + total*sizeof(s16_t), sdl_buf + sdl_outptr,
++	       amount*sizeof(s16_t));
++	total += amount;
++	sdl_outptr += amount;
++	if (sdl_outptr == sdl_len)
++	    sdl_outptr = 0;
++    }
++}
++
++static int sdl_init(sound_t *s, char *param, int *speed,
++		    int *fragsize, int *fragnr, double bufsize)
++{
++    SDL_AudioSpec		spec;
++    memset(&spec, 0, sizeof(spec));
++    spec.freq = *speed;
++    spec.format = AUDIO_S16 | AUDIO_MONO;
++    spec.samples = *fragsize;
++    spec.callback = sdl_callback;
++    sdl_spec = SDL_OpenAudio(&spec);
++    if (!sdl_spec)
++	return 1;
++    if (sdl_spec->format != (AUDIO_S16 | AUDIO_MONO))
++    {
++	sdl_spec = NULL;
++	SDL_CloseAudio();
++	return 1;
++    }
++    sdl_len = (*fragsize)*(*fragnr) + 1;
++    sdl_inptr = sdl_outptr = 0;
++    sdl_buf = xmalloc(sizeof(s16_t)*sdl_len);
++    if (!sdl_buf)
++    {
++	SDL_CloseAudio();
++	return 1;
++    }
++    *speed = sdl_spec->freq;
++    SDL_PauseAudio(0);
++    return 0;
++}
++
++static int sdl_write(sound_t *s, s16_t *pbuf, int nr)
++{
++    int			total, amount;
++    total = 0;
++    while (total < nr)
++    {
++	amount = sdl_outptr - sdl_inptr;
++	if (amount <= 0)
++	    amount = sdl_len - sdl_inptr;
++	if ((sdl_inptr + amount)%sdl_len == sdl_outptr)
++	    amount--;
++	if (amount <= 0)
++	{
++	    Sleep(5);
++	    continue;
++	}
++	if (total + amount > nr)
++	    amount = nr - total;
++	memcpy(sdl_buf + sdl_inptr, pbuf + total, amount*sizeof(s16_t));
++	sdl_inptr += amount;
++	total += amount;
++	if (sdl_inptr == sdl_len)
++	    sdl_inptr = 0;
++    }
++    return 0;
++}
++
++static int sdl_bufferstatus(sound_t *s, int first)
++{
++    int		amount;
++    amount = sdl_inptr - sdl_outptr;
++    if (amount < 0)
++	amount += sdl_len;
++    return amount;
++}
++
++static void sdl_close()
++{
++    sdl_spec = NULL;
++    SDL_CloseAudio();
++    free(sdl_buf);
++    sdl_buf = NULL;
++    sdl_inptr = sdl_outptr = sdl_len = 0;
++}
++
++
++static sid_device_t sdl_device =
++{
++    "sdl",
++    sdl_init,
++    sdl_write,
++    NULL,
++    NULL,
++    sdl_bufferstatus,
++    sdl_close,
++    NULL,
++    NULL
++};
++
++#else
++static sid_device_t sdl_device;
++#endif
++
++
++static sid_device_t *sid_devices[13] =
++{
++    &uss_device,
++    &sgi_device,
++    &sun_device,
++    &hpux_device,
++    &aix_device,
++    &midas_device,
++    &sdl_device,
++    &dummy_device,
++    &fs_device,
++    &speed_device,
++    &dump_device,
++    &test_device,
++    NULL
++};
++
++/*
++ * and the code itself
++ */
++
++#define BUFSIZE 32768
++typedef struct
++{
++    /* sid itself */
++    sound_t		 sid;
++    /* number of clocks between each sample. used value */
++    double		 clkstep;
++    /* number of clocks between each sample. original value */
++    double		 origclkstep;
++    /* factor between those two clksteps */
++    double		 clkfactor;
++    /* time of last sample generated */
++    double		 fclk;
++    /* time of last sid.clock() */
++    CLOCK		 sidclk;
++    /* time of last write to sid. used for pdev->dump() */
++    CLOCK		 wclk;
++    /* sample buffer */
++    s16_t		 buffer[BUFSIZE];
++    /* pointer to device structure in use */
++    sid_device_t	*pdev;
++    /* number of samples in a fragment */
++    int			 fragsize;
++    /* number of fragments in kernel buffer */
++    int			 fragnr;
++    /* number of samples in kernel buffer */
++    int			 bufsize;
++    /* return value of first pdev->bufferstatus() call to device */
++    int			 firststatus;
++    /* constants related to adjusting sound */
++    int			 prevused;
++    int			 prevfill;
++    /* is the device suspended? */
++    int			 issuspended;
++    s16_t		 lastsample;
++} siddata_t;
++
++static siddata_t siddata;
++
++/* close sid device and show error dialog if needed */
++static int closesid(char *msg)
++{
++    if (siddata.pdev)
++    {
++	warn(siddata.sid.pwarn, -1, "closing device '%s'", siddata.pdev->name);
++	if (siddata.pdev->close)
++	    siddata.pdev->close();
++	siddata.pdev = NULL;
++    }
++    if (msg)
++    {
++        suspend_speed_eval();
++	if (strcmp(msg, ""))
++	{
++	    UiError(msg);
++	    app_resources.sound = 0;
++	    UiUpdateMenus();
++	}
++    }
++    siddata.prevused = siddata.prevfill = 0;
++    return 1;
++}
++
++/* code to disable sid for a given number of seconds if needed */
++static int disabletime;
++
++static void suspendsid(char *reason)
++{
++    disabletime = time(0);
++    warn(siddata.sid.pwarn, -1, "SUSPEND: disabling sid for %d secs (%s)",
++	 app_resources.soundSuspendTime, reason);
++    closesid("");
++}
++
++static void enablesid()
++{
++    int		now, diff;
++    if (!disabletime)
++        return;
++    now = time(0);
++    diff = now - disabletime;
++    if (diff < 0 || diff >= app_resources.soundSuspendTime)
++    {
++        warn(siddata.sid.pwarn, -1, "ENABLE");
++        disabletime = 0;
++    }
++}
++
++/* open sound device */
++static int initsid()
++{
++    int					 i, tmp;
++    sid_device_t			*pdev;
++    char				*name;
++    char				*param;
++    int					 speed;
++    int					 fragsize;
++    int					 fragnr;
++    double				 bufsize;
++    char				 err[1024];
++
++    if (app_resources.soundSuspendTime > 0 && disabletime)
++        return 1;
++
++    name = app_resources.soundDeviceName;
++    param = app_resources.soundDeviceArg;
++    tmp = app_resources.soundBufferSize;
++    if (tmp < 100 || tmp > 1000)
++	tmp = SOUND_SAMPLE_BUFFER_SIZE;
++    bufsize = tmp / 1000.0;
++
++    speed = app_resources.soundSampleRate;
++    if (speed < 8000 || speed > 50000)
++	speed = SOUND_SAMPLE_RATE;
++    /* calculate optimal fragments */
++    fragsize = speed / FRAGS_PER_SECOND;
++    for (i = 1; 1 << i < fragsize; i++);
++    fragsize = 1 << i;
++    fragnr = (int)((speed*bufsize + fragsize - 1) / fragsize);
++    if (fragnr < 3)
++        fragnr = 3;
++
++    for (i = 0; (pdev = sid_devices[i]); i++)
++    {
++	if ((name && pdev->name && !strcmp(pdev->name, name)) ||
++	    (!name && pdev->name))
++	{
++	    if (pdev->init)
++	    {
++		tmp = pdev->init(&siddata.sid, param, &speed,
++				 &fragsize, &fragnr, bufsize);
++		if (tmp)
++		{
++		    sprintf(err, "Audio: initialization failed for device `%s'.",
++			    pdev->name);
++		    return closesid(err);
++		}
++	    }
++	    siddata.issuspended = -1;
++	    siddata.lastsample = 0;
++	    siddata.pdev = pdev;
++	    siddata.fragsize = fragsize;
++	    siddata.fragnr = fragnr;
++	    siddata.bufsize = fragsize*fragnr;
++	    warn(siddata.sid.pwarn, -1,
++		 "opened device '%s' speed %dHz fragsize %.3fs bufsize %.3fs",
++		 pdev->name, speed, (double)fragsize / speed,
++		 (double)siddata.bufsize / speed);
++	    app_resources.soundSampleRate = speed;
++	    if (pdev->write)
++		init_sid(&siddata.sid, siddata.buffer, speed);
++	    else
++		init_sid(&siddata.sid, NULL, speed);
++	    if (pdev->bufferstatus)
++		siddata.firststatus = pdev->bufferstatus(&siddata.sid, 1);
++	    siddata.clkstep = (double)CYCLES_PER_SEC / speed;
++	    siddata.origclkstep = siddata.clkstep;
++	    siddata.clkfactor = 1.0;
++	    siddata.fclk = clk;
++	    siddata.sidclk = clk;
++	    siddata.wclk = clk;
++	    return 0;
++	}
++    }
++    sprintf(err, "Audio: device `%s' not found or not supported.", name);
++    return closesid(err);
++}
++
++/* run sid */
++static int run_sid()
++{
++    int				i;
++    if (!app_resources.sound)
++	return 1;
++    if (app_resources.soundSuspendTime > 0 && disabletime)
++        return 1;
++    if (!siddata.pdev)
++    {
++	i = initsid();
++	if (i)
++	    return i;
++    }
++
++    int sample_count = int((clk - siddata.fclk)/siddata.clkstep);
++
++    if (siddata.sid.bufptr + sample_count > BUFSIZE)
++	return closesid("Audio: sound buffer overflow.");
++
++    while (siddata.fclk + siddata.clkstep <= clk) {
++      siddata.fclk += siddata.clkstep;
++      cycle_count delta_t = cycle_count(siddata.fclk - siddata.sidclk);
++      if (delta_t > 0) {
++	siddata.sidclk += delta_t;
++	sid.clock(delta_t);
++      }
++
++      if (siddata.sid.pbuf) {
++	siddata.sid.pbuf[siddata.sid.bufptr++] = sid.output();
++      }
++    }
++
++    sid.clock(clk - siddata.sidclk);
++    siddata.sidclk = clk;
++
++    return 0;
++}
++
++/* flush all generated samples from buffer to sounddevice. adjust sid runspeed
++   to match real running speed of program */
++int flush_sound()
++{
++    int			i, nr, space, used, fill = 0;
++
++    if (app_resources.soundSuspendTime > 0)
++        enablesid();
++    i = run_sid();
++    if (i)
++	return 0;
++    resume_sound();
++    if (siddata.pdev->flush)
++    {
++	i = siddata.pdev->flush(&siddata.sid);
++	if (i)
++	{
++	    closesid("Audio: cannot flush.");
++	    return 0;
++	}
++    }
++    if (siddata.sid.bufptr < siddata.fragsize)
++	return 0;
++    nr = siddata.sid.bufptr - siddata.sid.bufptr % siddata.fragsize;
++    /* adjust speed */
++    if (siddata.pdev->bufferstatus)
++    {
++	space = siddata.pdev->bufferstatus(&siddata.sid, 0);
++	if (!siddata.firststatus)
++	    space = siddata.bufsize - space;
++	used = siddata.bufsize - space;
++	if (space < 0 || used < 0)
++	{
++	    warn(siddata.sid.pwarn, -1, "fragment problems %d %d %d",
++		 space, used, siddata.firststatus);
++	    closesid("Audio: fragment problems.");
++	    return 0;
++	}
++	/* buffer empty */
++	if (used <= siddata.fragsize)
++	{
++	    s16_t		*p, v;
++	    int			 j;
++	    static int		 prev;
++	    int			 now;
++	    if (app_resources.soundSuspendTime > 0)
++	    {
++	        now = time(0);
++		if (now == prev)
++		{
++		    suspendsid("buffer overruns");
++		    return 0;
++		}
++		prev = now;
++	    }
++	    j = siddata.fragsize*siddata.fragnr - nr;
++	    if (j > siddata.bufsize / 2 &&
++		!app_resources.soundSpeedAdjustment &&
++		app_resources.speed)
++	    {
++		j = siddata.fragsize*(siddata.fragnr/2);
++	    }
++	    j *= sizeof(*p);
++	    if (j > 0)
++	    {
++	        p = (s16_t*)xmalloc(j);
++		v = siddata.sid.bufptr > 0 ? siddata.buffer[0] : 0;
++		for (i = 0; (size_t)i < j / sizeof(*p); i++)
++		    p[i] = (short)((float)v*i/(j / sizeof(*p)));
++		i = siddata.pdev->write(&siddata.sid, p,
++					j / sizeof(*p));
++		free(p);
++		if (i)
++		{
++		    closesid("Audio: write to sound device failed.");
++		    return 0;
++		}
++		siddata.lastsample = v;
++	    }
++	    fill = j;
++	}
++	if (!app_resources.soundSpeedAdjustment &&
++	    app_resources.speed > 0)
++	    siddata.clkfactor = app_resources.speed / 100.0;
++	else
++	{
++	    if (siddata.prevfill)
++		siddata.prevused = used;
++	    siddata.clkfactor *= 1.0 + 0.9*(used - siddata.prevused)/
++		siddata.bufsize;
++	}
++	siddata.prevused = used;
++	siddata.prevfill = fill;
++	siddata.clkfactor *= 0.9 + (used+nr)*0.12/siddata.bufsize;
++	siddata.clkstep = siddata.origclkstep * siddata.clkfactor;
++	if (CYCLES_PER_RFSH / siddata.clkstep >= siddata.bufsize)
++	{
++	    if (app_resources.soundSuspendTime > 0)
++	        suspendsid("running too slow");
++	    else
++	        closesid("Audio: running too slow.");
++	    return 0;
++	}
++	if (nr > space && nr < used)
++	    nr = space;
++    }
++    i = siddata.pdev->write(&siddata.sid, siddata.buffer, nr);
++    if (i)
++    {
++	closesid("Audio: write to sounddevice failed.");
++	return 0;
++    }
++    siddata.lastsample = siddata.buffer[nr-1];
++    siddata.sid.bufptr -= nr;
++    if (siddata.sid.bufptr > 0)
++    {
++	for (i = 0; i < siddata.sid.bufptr; i++)
++	    siddata.buffer[i] = siddata.buffer[i + nr];
++    }
++    return 0;
++}
++
++/* close sid */
++void close_sound()
++{
++    closesid(NULL);
++}
++
++/* suspend sid (eg. before pause) */
++void suspend_sound(void)
++{
++    int				 i;
++    s16_t			*p, v;
++    if (siddata.pdev)
++    {
++	if (siddata.pdev->write && siddata.issuspended == 0)
++	{
++	    p = (s16_t*)xmalloc(siddata.fragsize*sizeof(s16_t));
++	    if (!p)
++		return;
++	    v = siddata.lastsample;
++	    for (i = 0; i < siddata.fragsize; i++)
++		p[i] = (short)(v - (float)v*i/siddata.fragsize);
++	    free(p);
++	    i = siddata.pdev->write(&siddata.sid, p, siddata.fragsize);
++	    if (i)
++		return;
++	}
++	if (siddata.pdev->suspend && siddata.issuspended == 0)
++	{
++	    i = siddata.pdev->suspend(&siddata.sid);
++	    if (i)
++		return;
++	}
++	siddata.issuspended = 1;
++    }
++}
++
++/* resume sid */
++void resume_sound(void)
++{
++    int				i;
++    if (siddata.pdev)
++    {
++	if (siddata.pdev->resume && siddata.issuspended == 1)
++	{
++	    i = siddata.pdev->resume(&siddata.sid);
++	    siddata.issuspended = i ? 1 : 0;
++	}
++	else
++	    siddata.issuspended = 0;
++    }
++}
++
++/* initialize sid at program start -time */
++void initialize_sound()
++{
++    /* dummy init to get pwarn */
++    init_sid(&siddata.sid, NULL, SOUND_SAMPLE_RATE);
++}
++
++/* adjust clk before overflow */
++void sid_prevent_clk_overflow()
++{
++    siddata.sid.laststoreclk -= PREVENT_CLK_OVERFLOW_SUB;
++
++    if (!siddata.pdev)
++	return;
++    siddata.wclk -= PREVENT_CLK_OVERFLOW_SUB;
++    siddata.sidclk -= PREVENT_CLK_OVERFLOW_SUB;
++    siddata.fclk -= PREVENT_CLK_OVERFLOW_SUB;
++}
++
++
++BYTE REGPARM1 read_sid(ADDRESS addr)
++{
++  run_sid();
++
++  addr &= 0x1f;
++  switch (addr) {
++  case 0x19:
++    return sid.potx.readPOT();
++  case 0x1a:
++    return sid.poty.readPOT();
++  case 0x1b:
++    return sid.voice3.wave.readOSC();
++  case 0x1c:
++    return sid.voice3.envelope.readENV();
++  }
++
++  CLOCK tmp;
++  while ((tmp = siddata.sid.laststorebit) &&
++	 (tmp = siddata.sid.laststoreclk + sidreadclocks[tmp]) < clk)
++  {
++    siddata.sid.laststoreclk = tmp;
++    siddata.sid.laststore &= 0xfeff >> siddata.sid.laststorebit--;
++  }
++
++  return siddata.sid.laststore;
++}
++
++
++void REGPARM2 store_sid(ADDRESS addr, BYTE byte)
++{
++  addr &= 0x1f;
++
++  int i = run_sid();
++  if (!i && siddata.pdev->dump) {
++    i = siddata.pdev->dump(addr, byte, clk - siddata.wclk);
++    siddata.wclk = clk;
++    if (i)
++      closesid("Audio: store to sounddevice failed.");
++  }
++
++  switch (addr) {
++  case 0x00:
++    sid.voice1.wave.writeFREQ_LO(byte);
++    break;
++  case 0x01:
++    sid.voice1.wave.writeFREQ_HI(byte);
++    break;
++  case 0x02:
++    sid.voice1.wave.writePW_LO(byte);
++    break;
++  case 0x03:
++    sid.voice1.wave.writePW_HI(byte);
++    break;
++  case 0x04:
++    sid.voice1.writeCONTROL_REG(byte);
++    break;
++  case 0x05:
++    sid.voice1.envelope.writeATTACK_DECAY(byte);
++    break;
++  case 0x06:
++    sid.voice1.envelope.writeSUSTAIN_RELEASE(byte);
++    break;
++  case 0x07:
++    sid.voice2.wave.writeFREQ_LO(byte);
++    break;
++  case 0x08:
++    sid.voice2.wave.writeFREQ_HI(byte);
++    break;
++  case 0x09:
++    sid.voice2.wave.writePW_LO(byte);
++    break;
++  case 0x0a:
++    sid.voice2.wave.writePW_HI(byte);
++    break;
++  case 0x0b:
++    sid.voice2.writeCONTROL_REG(byte);
++    break;
++  case 0x0c:
++    sid.voice2.envelope.writeATTACK_DECAY(byte);
++    break;
++  case 0x0d:
++    sid.voice2.envelope.writeSUSTAIN_RELEASE(byte);
++    break;
++  case 0x0e:
++    sid.voice3.wave.writeFREQ_LO(byte);
++    break;
++  case 0x0f:
++    sid.voice3.wave.writeFREQ_HI(byte);
++    break;
++  case 0x10:
++    sid.voice3.wave.writePW_LO(byte);
++    break;
++  case 0x11:
++    sid.voice3.wave.writePW_HI(byte);
++    break;
++  case 0x12:
++    sid.voice3.writeCONTROL_REG(byte);
++    break;
++  case 0x13:
++    sid.voice3.envelope.writeATTACK_DECAY(byte);
++    break;
++  case 0x14:
++    sid.voice3.envelope.writeSUSTAIN_RELEASE(byte);
++    break;
++  case 0x15:
++    sid.filter.writeFC_LO(byte);
++    break;
++  case 0x16:
++    sid.filter.writeFC_HI(byte);
++    break;
++  case 0x17:
++    sid.filter.writeRES_FILT(byte);
++    break;
++  case 0x18:
++    sid.filter.writeMODE_VOL(byte);
++    break;
++  }
++
++  siddata.sid.laststore = byte;
++  siddata.sid.laststorebit = 8;
++  siddata.sid.laststoreclk = clk;
++}
++
++
++void reset_sid()
++{
++  sid.reset();
++
++  // maincpu.c::reset() first calls this function,
++  // then sets clk = 6 without resetting the clock variables below.
++  siddata.fclk = 0;
++  siddata.sidclk = 0;
++  siddata.wclk = 0;
++}
++
++
++} // extern "C"
+diff -ruN vice-0.14.2/src/Makefile.in vice-0.14.2-resid/src/Makefile.in
+--- vice-0.14.2/src/Makefile.in	Sun Mar 29 21:22:20 1998
++++ vice-0.14.2-resid/src/Makefile.in	Mon Jun  8 00:00:15 1998
+@@ -283,8 +283,12 @@
+ 
+ PARALLEL_OBJS = parallel.o
+ 
++SID_OBJ = @SID_OBJ@
++RESID_OBJ = @RESID_OBJ@
++RESID_LIB = @RESID_LIB@
++
+ C64_OBJS = main.o maincpu.o misc.o mon.o patchrom.o \
+-	reu.o resources.o serial.o tapeunit.o tpi.o traps.o true1541.o sid.o \
++	reu.o resources.o serial.o tapeunit.o tpi.o traps.o true1541.o $(SID_OBJ) \
+ 	$(X64_SYSPEC_OBJS)
+ 
+ C64_LOBJS = $(C64ODIR)/cia1.o $(C64ODIR)/cia2.o $(C64ODIR)/c64mem.o \
+@@ -307,7 +311,7 @@
+ 	$(PETODIR)/pets.o $(PETODIR)/pia.o
+ 
+ C64_DEPS = $(C64_OBJS) $(JOY_OBJS) $(PARALLEL_OBJS) $(TRUE1541_OBJS) \
+-	$(COMMON_OBJS) $(C64_LOBJS) $(COMMON_LIBS)
++	 $(RESID_OBJ) $(COMMON_OBJS) $(C64_LOBJS) $(COMMON_LIBS)
+ 
+ VIC_DEPS = $(VIC20_OBJS) $(JOY_OBJS) $(TRUE1541_OBJS) \
+ 	$(COMMON_OBJS) $(VIC20_LOBJS) $(COMMON_LIBS)
+@@ -340,7 +344,6 @@
+ .PHONY: all
+ all: $(EMUBIN) $(UTILBIN)
+ 
+-
+ ### Default rule for building C object files.
+ 
+ %.o: %.c
+@@ -367,8 +370,11 @@
+ x64:	$(BINDIR)/x64
+ 
+ $(BINDIR)/x64: $(C64_DEPS)
+-	$(CC) $(LDFLAGS) -o $@ $(C64_DEPS) $(LIBS) -lm
++	$(CC) $(LDFLAGS) -o $@ $(C64_DEPS) $(LIBS) -lm $(RESID_LIB)
+ #	rm -f ./x64; $(LN_S) $(BINDIR)/x64 ./x64
++
++6581.o: $(SRCDIR)/6581.cc
++	$(CXX) $(CXXFLAGS) $(DEFS) $(INCLUDES) -o $@ -c $<
+ 
+ $(C64_OBJS):
+ 	$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -o $@ -c $(SRCDIR)/$(@:.o=.c)
+diff -ruN vice-0.14.2/src/configure vice-0.14.2-resid/src/configure
+--- vice-0.14.2/src/configure	Wed Mar 11 21:59:28 1998
++++ vice-0.14.2-resid/src/configure	Mon Jun  8 00:00:25 1998
+@@ -22,6 +22,8 @@
+ ac_help="$ac_help
+   --disable-textfield     disable enhanced text field widget"
+ ac_help="$ac_help
++  --with-resid            use reSID library for sound in x64"
++ac_help="$ac_help
+   --with-xaw3d            use Xaw3d library instead of plain Xaw"
+ ac_help="$ac_help
+   --with-x                use the X Window System"
+@@ -560,7 +562,7 @@
+ fi
+ 
+ echo $ac_n "checking host system type""... $ac_c" 1>&6
+-echo "configure:564: checking host system type" >&5
++echo "configure:566: checking host system type" >&5
+ 
+ host_alias=$host
+ case "$host_alias" in
+@@ -612,9 +614,15 @@
+   :
+ fi
+ 
+-# Check whether --enable-xaw3d or --disable-xaw3d was given.
+-if test "${enable_xaw3d+set}" = set; then
+-  enableval="$enable_xaw3d"
++# Check whether --with-resid or --without-resid was given.
++if test "${with_resid+set}" = set; then
++  withval="$with_resid"
++  :
++fi
++
++# Check whether --with-xaw3d or --without-xaw3d was given.
++if test "${with_xaw3d+set}" = set; then
++  withval="$with_xaw3d"
+   :
+ fi
+ 
+@@ -657,13 +665,26 @@
+   echo "using ugly Athena text widget."
+ fi
+ 
++if test "$with_resid" = yes; then
++  SID_OBJ=
++  RESID_OBJ="6581.o"
++  RESID_LIB="-lmos6581"
++else
++  SID_OBJ="sid.o"
++  RESID_OBJ=
++  RESID_LIB=
++fi
++
++
++
++
+ 
+ if test "$host_vendor" = "go32" -o "$host_vendor" = "msdos"; then
+ 
+         # Extract the first word of "gcc-dos", so it can be a program name with args.
+ set dummy gcc-dos; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:667: checking for $ac_word" >&5
++echo "configure:688: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -706,7 +727,7 @@
+         # Extract the first word of "gcc", so it can be a program name with args.
+ set dummy gcc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:710: checking for $ac_word" >&5
++echo "configure:731: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -735,7 +756,7 @@
+   # Extract the first word of "cc", so it can be a program name with args.
+ set dummy cc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:739: checking for $ac_word" >&5
++echo "configure:760: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -783,7 +804,7 @@
+ fi
+ 
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works""... $ac_c" 1>&6
+-echo "configure:787: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
++echo "configure:808: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
+ 
+ ac_ext=c
+ # CFLAGS is not in ac_cpp because -g, -O, etc. are not valid cpp options.
+@@ -793,11 +814,11 @@
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ cat > conftest.$ac_ext <<EOF
+-#line 797 "configure"
++#line 818 "configure"
+ #include "confdefs.h"
+ main(){return(0);}
+ EOF
+-if { (eval echo configure:801: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:822: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   ac_cv_prog_cc_works=yes
+   # If we can't run a trivial program, we are probably using a cross compiler.
+   if (./conftest; exit) 2>/dev/null; then
+@@ -817,12 +838,12 @@
+   { echo "configure: error: installation or configuration problem: C compiler cannot create executables." 1>&2; exit 1; }
+ fi
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler""... $ac_c" 1>&6
+-echo "configure:821: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
++echo "configure:842: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
+ echo "$ac_t""$ac_cv_prog_cc_cross" 1>&6
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ echo $ac_n "checking whether we are using GNU C""... $ac_c" 1>&6
+-echo "configure:826: checking whether we are using GNU C" >&5
++echo "configure:847: checking whether we are using GNU C" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_gcc'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -831,7 +852,7 @@
+   yes;
+ #endif
+ EOF
+-if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:835: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
++if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:856: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
+   ac_cv_prog_gcc=yes
+ else
+   ac_cv_prog_gcc=no
+@@ -846,7 +867,7 @@
+   ac_save_CFLAGS="$CFLAGS"
+   CFLAGS=
+   echo $ac_n "checking whether ${CC-cc} accepts -g""... $ac_c" 1>&6
+-echo "configure:850: checking whether ${CC-cc} accepts -g" >&5
++echo "configure:871: checking whether ${CC-cc} accepts -g" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_cc_g'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -895,7 +916,7 @@
+             # Extract the first word of "gcc", so it can be a program name with args.
+ set dummy gcc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:899: checking for $ac_word" >&5
++echo "configure:920: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -924,7 +945,7 @@
+   # Extract the first word of "cc", so it can be a program name with args.
+ set dummy cc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:928: checking for $ac_word" >&5
++echo "configure:949: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -972,7 +993,7 @@
+ fi
+ 
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works""... $ac_c" 1>&6
+-echo "configure:976: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
++echo "configure:997: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
+ 
+ ac_ext=c
+ # CFLAGS is not in ac_cpp because -g, -O, etc. are not valid cpp options.
+@@ -982,11 +1003,11 @@
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ cat > conftest.$ac_ext <<EOF
+-#line 986 "configure"
++#line 1007 "configure"
+ #include "confdefs.h"
+ main(){return(0);}
+ EOF
+-if { (eval echo configure:990: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:1011: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   ac_cv_prog_cc_works=yes
+   # If we can't run a trivial program, we are probably using a cross compiler.
+   if (./conftest; exit) 2>/dev/null; then
+@@ -1006,12 +1027,12 @@
+   { echo "configure: error: installation or configuration problem: C compiler cannot create executables." 1>&2; exit 1; }
+ fi
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler""... $ac_c" 1>&6
+-echo "configure:1010: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
++echo "configure:1031: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
+ echo "$ac_t""$ac_cv_prog_cc_cross" 1>&6
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ echo $ac_n "checking whether we are using GNU C""... $ac_c" 1>&6
+-echo "configure:1015: checking whether we are using GNU C" >&5
++echo "configure:1036: checking whether we are using GNU C" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_gcc'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1020,7 +1041,7 @@
+   yes;
+ #endif
+ EOF
+-if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:1024: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
++if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:1045: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
+   ac_cv_prog_gcc=yes
+ else
+   ac_cv_prog_gcc=no
+@@ -1035,7 +1056,7 @@
+   ac_save_CFLAGS="$CFLAGS"
+   CFLAGS=
+   echo $ac_n "checking whether ${CC-cc} accepts -g""... $ac_c" 1>&6
+-echo "configure:1039: checking whether ${CC-cc} accepts -g" >&5
++echo "configure:1060: checking whether ${CC-cc} accepts -g" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_cc_g'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1071,7 +1092,7 @@
+         # Extract the first word of "gcc", so it can be a program name with args.
+ set dummy gcc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1075: checking for $ac_word" >&5
++echo "configure:1096: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1100,7 +1121,7 @@
+   # Extract the first word of "cc", so it can be a program name with args.
+ set dummy cc; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1104: checking for $ac_word" >&5
++echo "configure:1125: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_CC'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1148,7 +1169,7 @@
+ fi
+ 
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works""... $ac_c" 1>&6
+-echo "configure:1152: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
++echo "configure:1173: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) works" >&5
+ 
+ ac_ext=c
+ # CFLAGS is not in ac_cpp because -g, -O, etc. are not valid cpp options.
+@@ -1158,11 +1179,11 @@
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ cat > conftest.$ac_ext <<EOF
+-#line 1162 "configure"
++#line 1183 "configure"
+ #include "confdefs.h"
+ main(){return(0);}
+ EOF
+-if { (eval echo configure:1166: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:1187: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   ac_cv_prog_cc_works=yes
+   # If we can't run a trivial program, we are probably using a cross compiler.
+   if (./conftest; exit) 2>/dev/null; then
+@@ -1182,12 +1203,12 @@
+   { echo "configure: error: installation or configuration problem: C compiler cannot create executables." 1>&2; exit 1; }
+ fi
+ echo $ac_n "checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler""... $ac_c" 1>&6
+-echo "configure:1186: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
++echo "configure:1207: checking whether the C compiler ($CC $CFLAGS $LDFLAGS) is a cross-compiler" >&5
+ echo "$ac_t""$ac_cv_prog_cc_cross" 1>&6
+ cross_compiling=$ac_cv_prog_cc_cross
+ 
+ echo $ac_n "checking whether we are using GNU C""... $ac_c" 1>&6
+-echo "configure:1191: checking whether we are using GNU C" >&5
++echo "configure:1212: checking whether we are using GNU C" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_gcc'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1196,7 +1217,7 @@
+   yes;
+ #endif
+ EOF
+-if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:1200: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
++if { ac_try='${CC-cc} -E conftest.c'; { (eval echo configure:1221: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
+   ac_cv_prog_gcc=yes
+ else
+   ac_cv_prog_gcc=no
+@@ -1211,7 +1232,7 @@
+   ac_save_CFLAGS="$CFLAGS"
+   CFLAGS=
+   echo $ac_n "checking whether ${CC-cc} accepts -g""... $ac_c" 1>&6
+-echo "configure:1215: checking whether ${CC-cc} accepts -g" >&5
++echo "configure:1236: checking whether ${CC-cc} accepts -g" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_cc_g'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1243,9 +1264,145 @@
+ 
+ fi
+ 
++for ac_prog in $CCC c++ g++ gcc CC cxx cc++
++do
++# Extract the first word of "$ac_prog", so it can be a program name with args.
++set dummy $ac_prog; ac_word=$2
++echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
++echo "configure:1273: checking for $ac_word" >&5
++if eval "test \"`echo '$''{'ac_cv_prog_CXX'+set}'`\" = set"; then
++  echo $ac_n "(cached) $ac_c" 1>&6
++else
++  if test -n "$CXX"; then
++  ac_cv_prog_CXX="$CXX" # Let the user override the test.
++else
++  IFS="${IFS= 	}"; ac_save_ifs="$IFS"; IFS="${IFS}:"
++  for ac_dir in $PATH; do
++    test -z "$ac_dir" && ac_dir=.
++    if test -f $ac_dir/$ac_word; then
++      ac_cv_prog_CXX="$ac_prog"
++      break
++    fi
++  done
++  IFS="$ac_save_ifs"
++fi
++fi
++CXX="$ac_cv_prog_CXX"
++if test -n "$CXX"; then
++  echo "$ac_t""$CXX" 1>&6
++else
++  echo "$ac_t""no" 1>&6
++fi
++
++test -n "$CXX" && break
++done
++test -n "$CXX" || CXX="gcc"
++
++
++echo $ac_n "checking whether the C++ compiler ($CXX $CXXFLAGS $LDFLAGS) works""... $ac_c" 1>&6
++echo "configure:1304: checking whether the C++ compiler ($CXX $CXXFLAGS $LDFLAGS) works" >&5
++
++ac_ext=C
++# CXXFLAGS is not in ac_cpp because -g, -O, etc. are not valid cpp options.
++ac_cpp='$CXXCPP $CPPFLAGS'
++ac_compile='${CXX-g++} -c $CXXFLAGS $CPPFLAGS conftest.$ac_ext 1>&5'
++ac_link='${CXX-g++} -o conftest $CXXFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS 1>&5'
++cross_compiling=$ac_cv_prog_cxx_cross
++
++cat > conftest.$ac_ext <<EOF
++#line 1314 "configure"
++#include "confdefs.h"
++main(){return(0);}
++EOF
++if { (eval echo configure:1318: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++  ac_cv_prog_cxx_works=yes
++  # If we can't run a trivial program, we are probably using a cross compiler.
++  if (./conftest; exit) 2>/dev/null; then
++    ac_cv_prog_cxx_cross=no
++  else
++    ac_cv_prog_cxx_cross=yes
++  fi
++else
++  echo "configure: failed program was:" >&5
++  cat conftest.$ac_ext >&5
++  ac_cv_prog_cxx_works=no
++fi
++rm -fr conftest*
++ac_ext=c
++# CFLAGS is not in ac_cpp because -g, -O, etc. are not valid cpp options.
++ac_cpp='$CPP $CPPFLAGS'
++ac_compile='${CC-cc} -c $CFLAGS $CPPFLAGS conftest.$ac_ext 1>&5'
++ac_link='${CC-cc} -o conftest $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS 1>&5'
++cross_compiling=$ac_cv_prog_cc_cross
++
++echo "$ac_t""$ac_cv_prog_cxx_works" 1>&6
++if test $ac_cv_prog_cxx_works = no; then
++  { echo "configure: error: installation or configuration problem: C++ compiler cannot create executables." 1>&2; exit 1; }
++fi
++echo $ac_n "checking whether the C++ compiler ($CXX $CXXFLAGS $LDFLAGS) is a cross-compiler""... $ac_c" 1>&6
++echo "configure:1344: checking whether the C++ compiler ($CXX $CXXFLAGS $LDFLAGS) is a cross-compiler" >&5
++echo "$ac_t""$ac_cv_prog_cxx_cross" 1>&6
++cross_compiling=$ac_cv_prog_cxx_cross
++
++echo $ac_n "checking whether we are using GNU C++""... $ac_c" 1>&6
++echo "configure:1349: checking whether we are using GNU C++" >&5
++if eval "test \"`echo '$''{'ac_cv_prog_gxx'+set}'`\" = set"; then
++  echo $ac_n "(cached) $ac_c" 1>&6
++else
++  cat > conftest.C <<EOF
++#ifdef __GNUC__
++  yes;
++#endif
++EOF
++if { ac_try='${CXX-g++} -E conftest.C'; { (eval echo configure:1358: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }; } | egrep yes >/dev/null 2>&1; then
++  ac_cv_prog_gxx=yes
++else
++  ac_cv_prog_gxx=no
++fi
++fi
++
++echo "$ac_t""$ac_cv_prog_gxx" 1>&6
++
++if test $ac_cv_prog_gxx = yes; then
++  GXX=yes
++  ac_test_CXXFLAGS="${CXXFLAGS+set}"
++  ac_save_CXXFLAGS="$CXXFLAGS"
++  CXXFLAGS=
++  echo $ac_n "checking whether ${CXX-g++} accepts -g""... $ac_c" 1>&6
++echo "configure:1373: checking whether ${CXX-g++} accepts -g" >&5
++if eval "test \"`echo '$''{'ac_cv_prog_cxx_g'+set}'`\" = set"; then
++  echo $ac_n "(cached) $ac_c" 1>&6
++else
++  echo 'void f(){}' > conftest.cc
++if test -z "`${CXX-g++} -g -c conftest.cc 2>&1`"; then
++  ac_cv_prog_cxx_g=yes
++else
++  ac_cv_prog_cxx_g=no
++fi
++rm -f conftest*
++
++fi
++
++echo "$ac_t""$ac_cv_prog_cxx_g" 1>&6
++  if test "$ac_test_CXXFLAGS" = set; then
++    CXXFLAGS="$ac_save_CXXFLAGS"
++  elif test $ac_cv_prog_cxx_g = yes; then
++    CXXFLAGS="-g -O2"
++  else
++    CXXFLAGS="-O2"
++  fi
++else
++  GXX=
++  test "${CXXFLAGS+set}" = set || CXXFLAGS="-g"
++fi
++
++if test "$GXX" = yes -a "$GCC" = yes; then
++  CXXFLAGS=$CCFLAGS
++fi
++
+ 
+ echo $ac_n "checking how to run the C preprocessor""... $ac_c" 1>&6
+-echo "configure:1249: checking how to run the C preprocessor" >&5
++echo "configure:1406: checking how to run the C preprocessor" >&5
+ # On Suns, sometimes $CPP names a directory.
+ if test -n "$CPP" && test -d "$CPP"; then
+   CPP=
+@@ -1260,13 +1417,13 @@
+   # On the NeXT, cc -E runs the code through the compiler's parser,
+   # not just through cpp.
+   cat > conftest.$ac_ext <<EOF
+-#line 1264 "configure"
++#line 1421 "configure"
+ #include "confdefs.h"
+ #include <assert.h>
+ Syntax Error
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:1270: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:1427: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   :
+@@ -1277,13 +1434,13 @@
+   rm -rf conftest*
+   CPP="${CC-cc} -E -traditional-cpp"
+   cat > conftest.$ac_ext <<EOF
+-#line 1281 "configure"
++#line 1438 "configure"
+ #include "confdefs.h"
+ #include <assert.h>
+ Syntax Error
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:1287: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:1444: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   :
+@@ -1308,7 +1465,7 @@
+ # Extract the first word of "ar", so it can be a program name with args.
+ set dummy ar; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1312: checking for $ac_word" >&5
++echo "configure:1469: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_AR'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1337,7 +1494,7 @@
+ # Extract the first word of "ranlib", so it can be a program name with args.
+ set dummy ranlib; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1341: checking for $ac_word" >&5
++echo "configure:1498: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_RANLIB'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1374,7 +1531,7 @@
+ # SVR4 /usr/ucb/install, which tries to use the nonexistent group "staff"
+ # ./install, which can be erroneously created by make from ./install.sh.
+ echo $ac_n "checking for a BSD compatible install""... $ac_c" 1>&6
+-echo "configure:1378: checking for a BSD compatible install" >&5
++echo "configure:1535: checking for a BSD compatible install" >&5
+ if test -z "$INSTALL"; then
+ if eval "test \"`echo '$''{'ac_cv_path_install'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -1424,7 +1581,7 @@
+ test -z "$INSTALL_DATA" && INSTALL_DATA='${INSTALL} -m 644'
+ 
+ echo $ac_n "checking whether ln -s works""... $ac_c" 1>&6
+-echo "configure:1428: checking whether ln -s works" >&5
++echo "configure:1585: checking whether ln -s works" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_LN_S'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1448,7 +1605,7 @@
+ # Extract the first word of "gmake", so it can be a program name with args.
+ set dummy gmake; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1452: checking for $ac_word" >&5
++echo "configure:1609: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_MAKE'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1478,7 +1635,7 @@
+   # Extract the first word of "gnumake", so it can be a program name with args.
+ set dummy gnumake; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1482: checking for $ac_word" >&5
++echo "configure:1639: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_MAKE2'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1512,7 +1669,7 @@
+ # Extract the first word of "perl", so it can be a program name with args.
+ set dummy perl; ac_word=$2
+ echo $ac_n "checking for $ac_word""... $ac_c" 1>&6
+-echo "configure:1516: checking for $ac_word" >&5
++echo "configure:1673: checking for $ac_word" >&5
+ if eval "test \"`echo '$''{'ac_cv_path_PERL'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1544,7 +1701,7 @@
+ 
+ 
+ echo $ac_n "checking "whether cpp accepts -M"""... $ac_c" 1>&6
+-echo "configure:1548: checking "whether cpp accepts -M"" >&5
++echo "configure:1705: checking "whether cpp accepts -M"" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_cpp_M'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1565,12 +1722,12 @@
+ 
+ 
+ echo $ac_n "checking for ANSI C header files""... $ac_c" 1>&6
+-echo "configure:1569: checking for ANSI C header files" >&5
++echo "configure:1726: checking for ANSI C header files" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_stdc'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1574 "configure"
++#line 1731 "configure"
+ #include "confdefs.h"
+ #include <stdlib.h>
+ #include <stdarg.h>
+@@ -1578,7 +1735,7 @@
+ #include <float.h>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:1582: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:1739: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -1595,7 +1752,7 @@
+ if test $ac_cv_header_stdc = yes; then
+   # SunOS 4.x string.h does not declare mem*, contrary to ANSI.
+ cat > conftest.$ac_ext <<EOF
+-#line 1599 "configure"
++#line 1756 "configure"
+ #include "confdefs.h"
+ #include <string.h>
+ EOF
+@@ -1613,7 +1770,7 @@
+ if test $ac_cv_header_stdc = yes; then
+   # ISC 2.0.2 stdlib.h does not declare free, contrary to ANSI.
+ cat > conftest.$ac_ext <<EOF
+-#line 1617 "configure"
++#line 1774 "configure"
+ #include "confdefs.h"
+ #include <stdlib.h>
+ EOF
+@@ -1634,7 +1791,7 @@
+   :
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1638 "configure"
++#line 1795 "configure"
+ #include "confdefs.h"
+ #include <ctype.h>
+ #define ISLOWER(c) ('a' <= (c) && (c) <= 'z')
+@@ -1645,7 +1802,7 @@
+ exit (0); }
+ 
+ EOF
+-if { (eval echo configure:1649: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:1806: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   :
+ else
+@@ -1669,12 +1826,12 @@
+ fi
+ 
+ echo $ac_n "checking for off_t""... $ac_c" 1>&6
+-echo "configure:1673: checking for off_t" >&5
++echo "configure:1830: checking for off_t" >&5
+ if eval "test \"`echo '$''{'ac_cv_type_off_t'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1678 "configure"
++#line 1835 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #if STDC_HEADERS
+@@ -1702,12 +1859,12 @@
+ fi
+ 
+ echo $ac_n "checking for pid_t""... $ac_c" 1>&6
+-echo "configure:1706: checking for pid_t" >&5
++echo "configure:1863: checking for pid_t" >&5
+ if eval "test \"`echo '$''{'ac_cv_type_pid_t'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1711 "configure"
++#line 1868 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #if STDC_HEADERS
+@@ -1735,12 +1892,12 @@
+ fi
+ 
+ echo $ac_n "checking for size_t""... $ac_c" 1>&6
+-echo "configure:1739: checking for size_t" >&5
++echo "configure:1896: checking for size_t" >&5
+ if eval "test \"`echo '$''{'ac_cv_type_size_t'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1744 "configure"
++#line 1901 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #if STDC_HEADERS
+@@ -1770,21 +1927,21 @@
+ 
+ 
+ echo $ac_n "checking for inline""... $ac_c" 1>&6
+-echo "configure:1774: checking for inline" >&5
++echo "configure:1931: checking for inline" >&5
+ if eval "test \"`echo '$''{'ac_cv_c_inline'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   ac_cv_c_inline=no
+ for ac_kw in inline __inline__ __inline; do
+   cat > conftest.$ac_ext <<EOF
+-#line 1781 "configure"
++#line 1938 "configure"
+ #include "confdefs.h"
+ 
+ int main() {
+ } $ac_kw foo() {
+ ; return 0; }
+ EOF
+-if { (eval echo configure:1788: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:1945: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_c_inline=$ac_kw; break
+ else
+@@ -1816,14 +1973,14 @@
+ 
+ if test "$host_vendor" != "go32" -a "$host_vendor" != "msdos"; then
+   echo $ac_n "checking whether byte ordering is bigendian""... $ac_c" 1>&6
+-echo "configure:1820: checking whether byte ordering is bigendian" >&5
++echo "configure:1977: checking whether byte ordering is bigendian" >&5
+ if eval "test \"`echo '$''{'ac_cv_c_bigendian'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   ac_cv_c_bigendian=unknown
+ # See if sys/param.h defines the BYTE_ORDER macro.
+ cat > conftest.$ac_ext <<EOF
+-#line 1827 "configure"
++#line 1984 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <sys/param.h>
+@@ -1834,11 +1991,11 @@
+ #endif
+ ; return 0; }
+ EOF
+-if { (eval echo configure:1838: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:1995: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   # It does; now see whether it defined to BIG_ENDIAN or not.
+ cat > conftest.$ac_ext <<EOF
+-#line 1842 "configure"
++#line 1999 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <sys/param.h>
+@@ -1849,7 +2006,7 @@
+ #endif
+ ; return 0; }
+ EOF
+-if { (eval echo configure:1853: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:2010: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_c_bigendian=yes
+ else
+@@ -1869,7 +2026,7 @@
+     { echo "configure: error: can not run test program while cross compiling" 1>&2; exit 1; }
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1873 "configure"
++#line 2030 "configure"
+ #include "confdefs.h"
+ main () {
+   /* Are we little or big endian?  From Harbison&Steele.  */
+@@ -1882,7 +2039,7 @@
+   exit (u.c[sizeof (long) - 1] == 1);
+ }
+ EOF
+-if { (eval echo configure:1886: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:2043: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_c_bigendian=no
+ else
+@@ -1906,7 +2063,7 @@
+ fi
+ 
+   echo $ac_n "checking size of unsigned short""... $ac_c" 1>&6
+-echo "configure:1910: checking size of unsigned short" >&5
++echo "configure:2067: checking size of unsigned short" >&5
+ if eval "test \"`echo '$''{'ac_cv_sizeof_unsigned_short'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1914,7 +2071,7 @@
+     { echo "configure: error: can not run test program while cross compiling" 1>&2; exit 1; }
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1918 "configure"
++#line 2075 "configure"
+ #include "confdefs.h"
+ #include <stdio.h>
+ main()
+@@ -1925,7 +2082,7 @@
+   exit(0);
+ }
+ EOF
+-if { (eval echo configure:1929: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:2086: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_sizeof_unsigned_short=`cat conftestval`
+ else
+@@ -1945,7 +2102,7 @@
+ 
+ 
+   echo $ac_n "checking size of unsigned int""... $ac_c" 1>&6
+-echo "configure:1949: checking size of unsigned int" >&5
++echo "configure:2106: checking size of unsigned int" >&5
+ if eval "test \"`echo '$''{'ac_cv_sizeof_unsigned_int'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1953,7 +2110,7 @@
+     { echo "configure: error: can not run test program while cross compiling" 1>&2; exit 1; }
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1957 "configure"
++#line 2114 "configure"
+ #include "confdefs.h"
+ #include <stdio.h>
+ main()
+@@ -1964,7 +2121,7 @@
+   exit(0);
+ }
+ EOF
+-if { (eval echo configure:1968: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:2125: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_sizeof_unsigned_int=`cat conftestval`
+ else
+@@ -1984,7 +2141,7 @@
+ 
+ 
+   echo $ac_n "checking size of unsigned long""... $ac_c" 1>&6
+-echo "configure:1988: checking size of unsigned long" >&5
++echo "configure:2145: checking size of unsigned long" >&5
+ if eval "test \"`echo '$''{'ac_cv_sizeof_unsigned_long'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -1992,7 +2149,7 @@
+     { echo "configure: error: can not run test program while cross compiling" 1>&2; exit 1; }
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 1996 "configure"
++#line 2153 "configure"
+ #include "confdefs.h"
+ #include <stdio.h>
+ main()
+@@ -2003,7 +2160,7 @@
+   exit(0);
+ }
+ EOF
+-if { (eval echo configure:2007: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:2164: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_sizeof_unsigned_long=`cat conftestval`
+ else
+@@ -2040,13 +2197,13 @@
+ 
+ if test $ac_cv_prog_gcc = yes; then
+     echo $ac_n "checking whether ${CC-cc} needs -traditional""... $ac_c" 1>&6
+-echo "configure:2044: checking whether ${CC-cc} needs -traditional" >&5
++echo "configure:2201: checking whether ${CC-cc} needs -traditional" >&5
+ if eval "test \"`echo '$''{'ac_cv_prog_gcc_traditional'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+     ac_pattern="Autoconf.*'x'"
+   cat > conftest.$ac_ext <<EOF
+-#line 2050 "configure"
++#line 2207 "configure"
+ #include "confdefs.h"
+ #include <sgtty.h>
+ Autoconf TIOCGETP
+@@ -2064,7 +2221,7 @@
+ 
+   if test $ac_cv_prog_gcc_traditional = no; then
+     cat > conftest.$ac_ext <<EOF
+-#line 2068 "configure"
++#line 2225 "configure"
+ #include "confdefs.h"
+ #include <termio.h>
+ Autoconf TCGETA
+@@ -2092,12 +2249,12 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr that defines DIR""... $ac_c" 1>&6
+-echo "configure:2096: checking for $ac_hdr that defines DIR" >&5
++echo "configure:2253: checking for $ac_hdr that defines DIR" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_dirent_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2101 "configure"
++#line 2258 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <$ac_hdr>
+@@ -2105,7 +2262,7 @@
+ DIR *dirp = 0;
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2109: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:2266: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   eval "ac_cv_header_dirent_$ac_safe=yes"
+ else
+@@ -2130,7 +2287,7 @@
+ # Two versions of opendir et al. are in -ldir and -lx on SCO Xenix.
+ if test $ac_header_dirent = dirent.h; then
+ echo $ac_n "checking for opendir in -ldir""... $ac_c" 1>&6
+-echo "configure:2134: checking for opendir in -ldir" >&5
++echo "configure:2291: checking for opendir in -ldir" >&5
+ ac_lib_var=`echo dir'_'opendir | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -2138,7 +2295,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-ldir  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 2142 "configure"
++#line 2299 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -2149,7 +2306,7 @@
+ opendir()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2153: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:2310: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -2171,7 +2328,7 @@
+ 
+ else
+ echo $ac_n "checking for opendir in -lx""... $ac_c" 1>&6
+-echo "configure:2175: checking for opendir in -lx" >&5
++echo "configure:2332: checking for opendir in -lx" >&5
+ ac_lib_var=`echo x'_'opendir | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -2179,7 +2336,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lx  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 2183 "configure"
++#line 2340 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -2190,7 +2347,7 @@
+ opendir()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2194: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:2351: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -2216,17 +2373,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2220: checking for $ac_hdr" >&5
++echo "configure:2377: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2225 "configure"
++#line 2382 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2230: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2387: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2256,17 +2413,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2260: checking for $ac_hdr" >&5
++echo "configure:2417: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2265 "configure"
++#line 2422 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2270: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2427: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2294,12 +2451,12 @@
+ 
+ 
+ echo $ac_n "checking for sys_siglist declaration in signal.h or unistd.h""... $ac_c" 1>&6
+-echo "configure:2298: checking for sys_siglist declaration in signal.h or unistd.h" >&5
++echo "configure:2455: checking for sys_siglist declaration in signal.h or unistd.h" >&5
+ if eval "test \"`echo '$''{'ac_cv_decl_sys_siglist'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2303 "configure"
++#line 2460 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <signal.h>
+@@ -2311,7 +2468,7 @@
+ char *msg = *(sys_siglist + 1);
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2315: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:2472: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_decl_sys_siglist=yes
+ else
+@@ -2336,17 +2493,17 @@
+ if test "$host_vendor" != "go32" -a "$host_vendor" != "msdos"; then
+   ac_safe=`echo "linux/joystick.h" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for linux/joystick.h""... $ac_c" 1>&6
+-echo "configure:2340: checking for linux/joystick.h" >&5
++echo "configure:2497: checking for linux/joystick.h" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2345 "configure"
++#line 2502 "configure"
+ #include "confdefs.h"
+ #include <linux/joystick.h>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2350: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2507: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2370,16 +2527,16 @@
+ 
+   if test "$ac_cv_header_linux_joystick_h" = "yes" ; then
+     echo $ac_n "checking whether linux/joystick.h supports digital joysticks""... $ac_c" 1>&6
+-echo "configure:2374: checking whether linux/joystick.h supports digital joysticks" >&5
++echo "configure:2531: checking whether linux/joystick.h supports digital joysticks" >&5
+     cat > conftest.$ac_ext <<EOF
+-#line 2376 "configure"
++#line 2533 "configure"
+ #include "confdefs.h"
+  #include <linux/joystick.h> 
+ int main() {
+  struct DJS_DATA_TYPE djs; 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2383: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:2540: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+    LINUXJOYSTICK="$LINUXJOYSTICK -DHAS_DIGITAL_JOYSTICK"
+ 		     echo "$ac_t""yes" 1>&6 
+@@ -2397,17 +2554,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2401: checking for $ac_hdr" >&5
++echo "configure:2558: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2406 "configure"
++#line 2563 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2411: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2568: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2437,17 +2594,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2441: checking for $ac_hdr" >&5
++echo "configure:2598: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2446 "configure"
++#line 2603 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2451: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2608: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2477,17 +2634,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2481: checking for $ac_hdr" >&5
++echo "configure:2638: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2486 "configure"
++#line 2643 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2491: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2648: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2517,17 +2674,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:2521: checking for $ac_hdr" >&5
++echo "configure:2678: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2526 "configure"
++#line 2683 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2531: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2688: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2554,7 +2711,7 @@
+ done
+ 
+   echo $ac_n "checking for ALseterrorhandler in -laudio""... $ac_c" 1>&6
+-echo "configure:2558: checking for ALseterrorhandler in -laudio" >&5
++echo "configure:2715: checking for ALseterrorhandler in -laudio" >&5
+ ac_lib_var=`echo audio'_'ALseterrorhandler | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -2562,7 +2719,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-laudio $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 2566 "configure"
++#line 2723 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -2573,7 +2730,7 @@
+ ALseterrorhandler()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2577: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:2734: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -2601,7 +2758,7 @@
+ fi
+ 
+   echo $ac_n "checking for UMSAudioDevice_initialize in -lUMSobj""... $ac_c" 1>&6
+-echo "configure:2605: checking for UMSAudioDevice_initialize in -lUMSobj" >&5
++echo "configure:2762: checking for UMSAudioDevice_initialize in -lUMSobj" >&5
+ ac_lib_var=`echo UMSobj'_'UMSAudioDevice_initialize | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -2609,7 +2766,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lUMSobj $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 2613 "configure"
++#line 2770 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -2620,7 +2777,7 @@
+ UMSAudioDevice_initialize()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2624: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:2781: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -2648,7 +2805,7 @@
+ fi
+ 
+   echo $ac_n "checking for SDL_OpenAudio in -lSDL""... $ac_c" 1>&6
+-echo "configure:2652: checking for SDL_OpenAudio in -lSDL" >&5
++echo "configure:2809: checking for SDL_OpenAudio in -lSDL" >&5
+ ac_lib_var=`echo SDL'_'SDL_OpenAudio | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -2656,7 +2813,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lSDL $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 2660 "configure"
++#line 2817 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -2667,7 +2824,7 @@
+ SDL_OpenAudio()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2671: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:2828: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -2699,7 +2856,7 @@
+ 
+ if test "$host_vendor" != "go32" -a "$host_vendor" != "msdos"; then
+   echo $ac_n "checking for 8-bit clean memcmp""... $ac_c" 1>&6
+-echo "configure:2703: checking for 8-bit clean memcmp" >&5
++echo "configure:2860: checking for 8-bit clean memcmp" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_memcmp_clean'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+@@ -2707,7 +2864,7 @@
+   ac_cv_func_memcmp_clean=no
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2711 "configure"
++#line 2868 "configure"
+ #include "confdefs.h"
+ 
+ main()
+@@ -2717,7 +2874,7 @@
+ }
+ 
+ EOF
+-if { (eval echo configure:2721: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:2878: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_func_memcmp_clean=yes
+ else
+@@ -2736,12 +2893,12 @@
+ 
+ fi
+ echo $ac_n "checking return type of signal handlers""... $ac_c" 1>&6
+-echo "configure:2740: checking return type of signal handlers" >&5
++echo "configure:2897: checking return type of signal handlers" >&5
+ if eval "test \"`echo '$''{'ac_cv_type_signal'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2745 "configure"
++#line 2902 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <signal.h>
+@@ -2758,7 +2915,7 @@
+ int i;
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2762: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:2919: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_type_signal=void
+ else
+@@ -2778,17 +2935,17 @@
+ 
+ ac_safe=`echo "vfork.h" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for vfork.h""... $ac_c" 1>&6
+-echo "configure:2782: checking for vfork.h" >&5
++echo "configure:2939: checking for vfork.h" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2787 "configure"
++#line 2944 "configure"
+ #include "confdefs.h"
+ #include <vfork.h>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:2792: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:2949: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -2813,18 +2970,18 @@
+ fi
+ 
+ echo $ac_n "checking for working vfork""... $ac_c" 1>&6
+-echo "configure:2817: checking for working vfork" >&5
++echo "configure:2974: checking for working vfork" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_vfork_works'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   if test "$cross_compiling" = yes; then
+   echo $ac_n "checking for vfork""... $ac_c" 1>&6
+-echo "configure:2823: checking for vfork" >&5
++echo "configure:2980: checking for vfork" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_vfork'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2828 "configure"
++#line 2985 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char vfork(); below.  */
+@@ -2847,7 +3004,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:2851: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3008: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_vfork=yes"
+ else
+@@ -2868,7 +3025,7 @@
+ 
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2872 "configure"
++#line 3029 "configure"
+ #include "confdefs.h"
+ /* Thanks to Paul Eggert for this test.  */
+ #include <stdio.h>
+@@ -2963,7 +3120,7 @@
+   }
+ }
+ EOF
+-if { (eval echo configure:2967: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
++if { (eval echo configure:3124: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest && (./conftest; exit) 2>/dev/null
+ then
+   ac_cv_func_vfork_works=yes
+ else
+@@ -2988,12 +3145,12 @@
+ for ac_func in gettimeofday memmove atexit
+ do
+ echo $ac_n "checking for $ac_func""... $ac_c" 1>&6
+-echo "configure:2992: checking for $ac_func" >&5
++echo "configure:3149: checking for $ac_func" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_$ac_func'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 2997 "configure"
++#line 3154 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char $ac_func(); below.  */
+@@ -3016,7 +3173,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3020: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3177: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_$ac_func=yes"
+ else
+@@ -3047,12 +3204,12 @@
+ for ac_func in usleep
+ do
+ echo $ac_n "checking for $ac_func""... $ac_c" 1>&6
+-echo "configure:3051: checking for $ac_func" >&5
++echo "configure:3208: checking for $ac_func" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_$ac_func'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3056 "configure"
++#line 3213 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char $ac_func(); below.  */
+@@ -3075,7 +3232,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3079: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3236: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_$ac_func=yes"
+ else
+@@ -3104,12 +3261,12 @@
+ 
+ 
+ echo $ac_n "checking whether time.h and sys/time.h may both be included""... $ac_c" 1>&6
+-echo "configure:3108: checking whether time.h and sys/time.h may both be included" >&5
++echo "configure:3265: checking whether time.h and sys/time.h may both be included" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_time'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3113 "configure"
++#line 3270 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <sys/time.h>
+@@ -3118,7 +3275,7 @@
+ struct tm *tp;
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3122: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:3279: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_header_time=yes
+ else
+@@ -3139,12 +3296,12 @@
+ fi
+ 
+ echo $ac_n "checking whether struct tm is in sys/time.h or time.h""... $ac_c" 1>&6
+-echo "configure:3143: checking whether struct tm is in sys/time.h or time.h" >&5
++echo "configure:3300: checking whether struct tm is in sys/time.h or time.h" >&5
+ if eval "test \"`echo '$''{'ac_cv_struct_tm'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3148 "configure"
++#line 3305 "configure"
+ #include "confdefs.h"
+ #include <sys/types.h>
+ #include <time.h>
+@@ -3152,7 +3309,7 @@
+ struct tm *tp; tp->tm_sec;
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3156: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
++if { (eval echo configure:3313: \"$ac_compile\") 1>&5; (eval $ac_compile) 2>&5; }; then
+   rm -rf conftest*
+   ac_cv_struct_tm=time.h
+ else
+@@ -3181,7 +3338,7 @@
+ # Uses ac_ vars as temps to allow command line to override cache and checks.
+ # --without-x overrides everything else, but does not touch the cache.
+ echo $ac_n "checking for X""... $ac_c" 1>&6
+-echo "configure:3185: checking for X" >&5
++echo "configure:3342: checking for X" >&5
+ 
+ # Check whether --with-x or --without-x was given.
+ if test "${with_x+set}" = set; then
+@@ -3243,12 +3400,12 @@
+ 
+   # First, try using that file with no special directory specified.
+ cat > conftest.$ac_ext <<EOF
+-#line 3247 "configure"
++#line 3404 "configure"
+ #include "confdefs.h"
+ #include <$x_direct_test_include>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:3252: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:3409: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -3317,14 +3474,14 @@
+   ac_save_LIBS="$LIBS"
+   LIBS="-l$x_direct_test_library $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3321 "configure"
++#line 3478 "configure"
+ #include "confdefs.h"
+ 
+ int main() {
+ ${x_direct_test_function}()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3328: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3485: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   LIBS="$ac_save_LIBS"
+ # We can link X programs with no special library path.
+@@ -3430,17 +3587,17 @@
+     case "`(uname -sr) 2>/dev/null`" in
+     "SunOS 5"*)
+       echo $ac_n "checking whether -R must be followed by a space""... $ac_c" 1>&6
+-echo "configure:3434: checking whether -R must be followed by a space" >&5
++echo "configure:3591: checking whether -R must be followed by a space" >&5
+       ac_xsave_LIBS="$LIBS"; LIBS="$LIBS -R$x_libraries"
+       cat > conftest.$ac_ext <<EOF
+-#line 3437 "configure"
++#line 3594 "configure"
+ #include "confdefs.h"
+ 
+ int main() {
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3444: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3601: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   ac_R_nospace=yes
+ else
+@@ -3456,14 +3613,14 @@
+       else
+ 	LIBS="$ac_xsave_LIBS -R $x_libraries"
+ 	cat > conftest.$ac_ext <<EOF
+-#line 3460 "configure"
++#line 3617 "configure"
+ #include "confdefs.h"
+ 
+ int main() {
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3467: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3624: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   ac_R_space=yes
+ else
+@@ -3495,7 +3652,7 @@
+     # libraries were built with DECnet support.  And karl@cs.umb.edu says
+     # the Alpha needs dnet_stub (dnet does not exist).
+     echo $ac_n "checking for dnet_ntoa in -ldnet""... $ac_c" 1>&6
+-echo "configure:3499: checking for dnet_ntoa in -ldnet" >&5
++echo "configure:3656: checking for dnet_ntoa in -ldnet" >&5
+ ac_lib_var=`echo dnet'_'dnet_ntoa | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3503,7 +3660,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-ldnet  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3507 "configure"
++#line 3664 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3514,7 +3671,7 @@
+ dnet_ntoa()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3518: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3675: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3536,7 +3693,7 @@
+ 
+     if test $ac_cv_lib_dnet_dnet_ntoa = no; then
+       echo $ac_n "checking for dnet_ntoa in -ldnet_stub""... $ac_c" 1>&6
+-echo "configure:3540: checking for dnet_ntoa in -ldnet_stub" >&5
++echo "configure:3697: checking for dnet_ntoa in -ldnet_stub" >&5
+ ac_lib_var=`echo dnet_stub'_'dnet_ntoa | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3544,7 +3701,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-ldnet_stub  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3548 "configure"
++#line 3705 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3555,7 +3712,7 @@
+ dnet_ntoa()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3559: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3716: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3584,12 +3741,12 @@
+     # The nsl library prevents programs from opening the X display
+     # on Irix 5.2, according to dickey@clark.net.
+     echo $ac_n "checking for gethostbyname""... $ac_c" 1>&6
+-echo "configure:3588: checking for gethostbyname" >&5
++echo "configure:3745: checking for gethostbyname" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_gethostbyname'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3593 "configure"
++#line 3750 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char gethostbyname(); below.  */
+@@ -3612,7 +3769,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3616: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3773: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_gethostbyname=yes"
+ else
+@@ -3633,7 +3790,7 @@
+ 
+     if test $ac_cv_func_gethostbyname = no; then
+       echo $ac_n "checking for gethostbyname in -lnsl""... $ac_c" 1>&6
+-echo "configure:3637: checking for gethostbyname in -lnsl" >&5
++echo "configure:3794: checking for gethostbyname in -lnsl" >&5
+ ac_lib_var=`echo nsl'_'gethostbyname | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3641,7 +3798,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lnsl  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3645 "configure"
++#line 3802 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3652,7 +3809,7 @@
+ gethostbyname()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3656: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3813: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3682,12 +3839,12 @@
+     # -lsocket must be given before -lnsl if both are needed.
+     # We assume that if connect needs -lnsl, so does gethostbyname.
+     echo $ac_n "checking for connect""... $ac_c" 1>&6
+-echo "configure:3686: checking for connect" >&5
++echo "configure:3843: checking for connect" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_connect'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3691 "configure"
++#line 3848 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char connect(); below.  */
+@@ -3710,7 +3867,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3714: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3871: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_connect=yes"
+ else
+@@ -3731,7 +3888,7 @@
+ 
+     if test $ac_cv_func_connect = no; then
+       echo $ac_n "checking for connect in -lsocket""... $ac_c" 1>&6
+-echo "configure:3735: checking for connect in -lsocket" >&5
++echo "configure:3892: checking for connect in -lsocket" >&5
+ ac_lib_var=`echo socket'_'connect | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3739,7 +3896,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lsocket $X_EXTRA_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3743 "configure"
++#line 3900 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3750,7 +3907,7 @@
+ connect()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3754: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3911: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3774,12 +3931,12 @@
+ 
+     # gomez@mi.uni-erlangen.de says -lposix is necessary on A/UX.
+     echo $ac_n "checking for remove""... $ac_c" 1>&6
+-echo "configure:3778: checking for remove" >&5
++echo "configure:3935: checking for remove" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_remove'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3783 "configure"
++#line 3940 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char remove(); below.  */
+@@ -3802,7 +3959,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3806: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:3963: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_remove=yes"
+ else
+@@ -3823,7 +3980,7 @@
+ 
+     if test $ac_cv_func_remove = no; then
+       echo $ac_n "checking for remove in -lposix""... $ac_c" 1>&6
+-echo "configure:3827: checking for remove in -lposix" >&5
++echo "configure:3984: checking for remove in -lposix" >&5
+ ac_lib_var=`echo posix'_'remove | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3831,7 +3988,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lposix  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3835 "configure"
++#line 3992 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3842,7 +3999,7 @@
+ remove()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3846: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4003: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3866,12 +4023,12 @@
+ 
+     # BSDI BSD/OS 2.1 needs -lipc for XOpenDisplay.
+     echo $ac_n "checking for shmat""... $ac_c" 1>&6
+-echo "configure:3870: checking for shmat" >&5
++echo "configure:4027: checking for shmat" >&5
+ if eval "test \"`echo '$''{'ac_cv_func_shmat'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 3875 "configure"
++#line 4032 "configure"
+ #include "confdefs.h"
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char shmat(); below.  */
+@@ -3894,7 +4051,7 @@
+ 
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3898: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4055: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_func_shmat=yes"
+ else
+@@ -3915,7 +4072,7 @@
+ 
+     if test $ac_cv_func_shmat = no; then
+       echo $ac_n "checking for shmat in -lipc""... $ac_c" 1>&6
+-echo "configure:3919: checking for shmat in -lipc" >&5
++echo "configure:4076: checking for shmat in -lipc" >&5
+ ac_lib_var=`echo ipc'_'shmat | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3923,7 +4080,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lipc  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3927 "configure"
++#line 4084 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3934,7 +4091,7 @@
+ shmat()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3938: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4095: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -3967,7 +4124,7 @@
+   # libraries we check for below, so use a different variable.
+   #  --interran@uluru.Stanford.EDU, kb@cs.umb.edu.
+   echo $ac_n "checking for IceConnectionNumber in -lICE""... $ac_c" 1>&6
+-echo "configure:3971: checking for IceConnectionNumber in -lICE" >&5
++echo "configure:4128: checking for IceConnectionNumber in -lICE" >&5
+ ac_lib_var=`echo ICE'_'IceConnectionNumber | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -3975,7 +4132,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lICE  $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 3979 "configure"
++#line 4136 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -3986,7 +4143,7 @@
+ IceConnectionNumber()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:3990: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4147: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4018,7 +4175,7 @@
+   MISSING_X_LIBS=""
+ 
+   echo $ac_n "checking for gethostbyname in -lsocket""... $ac_c" 1>&6
+-echo "configure:4022: checking for gethostbyname in -lsocket" >&5
++echo "configure:4179: checking for gethostbyname in -lsocket" >&5
+ ac_lib_var=`echo socket'_'gethostbyname | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4026,7 +4183,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lsocket $X_LIBS -lnsl $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4030 "configure"
++#line 4187 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4037,7 +4194,7 @@
+ gethostbyname()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4041: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4198: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4066,7 +4223,7 @@
+ 
+ 
+   echo $ac_n "checking for XCreateWindow in -lX11""... $ac_c" 1>&6
+-echo "configure:4070: checking for XCreateWindow in -lX11" >&5
++echo "configure:4227: checking for XCreateWindow in -lX11" >&5
+ ac_lib_var=`echo X11'_'XCreateWindow | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4074,7 +4231,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lX11 $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4078 "configure"
++#line 4235 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4085,7 +4242,7 @@
+ XCreateWindow()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4089: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4246: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4115,7 +4272,7 @@
+ 
+ 
+   echo $ac_n "checking for XQueryExtension in -lXext""... $ac_c" 1>&6
+-echo "configure:4119: checking for XQueryExtension in -lXext" >&5
++echo "configure:4276: checking for XQueryExtension in -lXext" >&5
+ ac_lib_var=`echo Xext'_'XQueryExtension | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4123,7 +4280,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXext $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4127 "configure"
++#line 4284 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4134,7 +4291,7 @@
+ XQueryExtension()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4138: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4295: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4163,7 +4320,7 @@
+ 
+ 
+   echo $ac_n "checking for XtToolkitInitialize in -lXt""... $ac_c" 1>&6
+-echo "configure:4167: checking for XtToolkitInitialize in -lXt" >&5
++echo "configure:4324: checking for XtToolkitInitialize in -lXt" >&5
+ ac_lib_var=`echo Xt'_'XtToolkitInitialize | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4171,7 +4328,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXt $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4175 "configure"
++#line 4332 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4182,7 +4339,7 @@
+ XtToolkitInitialize()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4186: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4343: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4212,7 +4369,7 @@
+ 
+ 
+   echo $ac_n "checking for XInternAtom in -lXmu""... $ac_c" 1>&6
+-echo "configure:4216: checking for XInternAtom in -lXmu" >&5
++echo "configure:4373: checking for XInternAtom in -lXmu" >&5
+ ac_lib_var=`echo Xmu'_'XInternAtom | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4220,7 +4377,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXmu $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4224 "configure"
++#line 4381 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4231,7 +4388,7 @@
+ XInternAtom()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4235: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4392: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4262,7 +4419,7 @@
+ 
+     if test "$with_xaw3d" != "yes" ; then
+     echo $ac_n "checking for XawFormDoLayout in -lXaw""... $ac_c" 1>&6
+-echo "configure:4266: checking for XawFormDoLayout in -lXaw" >&5
++echo "configure:4423: checking for XawFormDoLayout in -lXaw" >&5
+ ac_lib_var=`echo Xaw'_'XawFormDoLayout | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4270,7 +4427,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXaw $X_LIBS $X_PRE_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4274 "configure"
++#line 4431 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4281,7 +4438,7 @@
+ XawFormDoLayout()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4285: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4442: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4311,7 +4468,7 @@
+ 
+   else
+     echo $ac_n "checking for XawFormDoLayout in -lXaw3d""... $ac_c" 1>&6
+-echo "configure:4315: checking for XawFormDoLayout in -lXaw3d" >&5
++echo "configure:4472: checking for XawFormDoLayout in -lXaw3d" >&5
+ ac_lib_var=`echo Xaw3d'_'XawFormDoLayout | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4319,7 +4476,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXaw3d $X_LIBS $X_PRE_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4323 "configure"
++#line 4480 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4330,7 +4487,7 @@
+ XawFormDoLayout()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4334: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4491: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4361,7 +4518,7 @@
+   fi
+ 
+     echo $ac_n "checking for XShmPutImage in -lXext""... $ac_c" 1>&6
+-echo "configure:4365: checking for XShmPutImage in -lXext" >&5
++echo "configure:4522: checking for XShmPutImage in -lXext" >&5
+ ac_lib_var=`echo Xext'_'XShmPutImage | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4369,7 +4526,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXext $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4373 "configure"
++#line 4530 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4380,7 +4537,7 @@
+ XShmPutImage()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4384: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4541: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4405,7 +4562,7 @@
+ 
+ 
+   echo $ac_n "checking for XpmCreatePixmapFromData in -lXpm""... $ac_c" 1>&6
+-echo "configure:4409: checking for XpmCreatePixmapFromData in -lXpm" >&5
++echo "configure:4566: checking for XpmCreatePixmapFromData in -lXpm" >&5
+ ac_lib_var=`echo Xpm'_'XpmCreatePixmapFromData | sed 'y%./+-%__p_%'`
+ if eval "test \"`echo '$''{'ac_cv_lib_$ac_lib_var'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+@@ -4413,7 +4570,7 @@
+   ac_save_LIBS="$LIBS"
+ LIBS="-lXpm $X_LIBS $LIBS"
+ cat > conftest.$ac_ext <<EOF
+-#line 4417 "configure"
++#line 4574 "configure"
+ #include "confdefs.h"
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ /* We use char because int might match the return type of a gcc2
+@@ -4424,7 +4581,7 @@
+ XpmCreatePixmapFromData()
+ ; return 0; }
+ EOF
+-if { (eval echo configure:4428: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
++if { (eval echo configure:4585: \"$ac_link\") 1>&5; (eval $ac_link) 2>&5; } && test -s conftest; then
+   rm -rf conftest*
+   eval "ac_cv_lib_$ac_lib_var=yes"
+ else
+@@ -4463,17 +4620,17 @@
+ do
+ ac_safe=`echo "$ac_hdr" | sed 'y%./+-%__p_%'`
+ echo $ac_n "checking for $ac_hdr""... $ac_c" 1>&6
+-echo "configure:4467: checking for $ac_hdr" >&5
++echo "configure:4624: checking for $ac_hdr" >&5
+ if eval "test \"`echo '$''{'ac_cv_header_$ac_safe'+set}'`\" = set"; then
+   echo $ac_n "(cached) $ac_c" 1>&6
+ else
+   cat > conftest.$ac_ext <<EOF
+-#line 4472 "configure"
++#line 4629 "configure"
+ #include "confdefs.h"
+ #include <$ac_hdr>
+ EOF
+ ac_try="$ac_cpp conftest.$ac_ext >/dev/null 2>conftest.out"
+-{ (eval echo configure:4477: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
++{ (eval echo configure:4634: \"$ac_try\") 1>&5; (eval $ac_try) 2>&5; }
+ ac_err=`grep -v '^ *+' conftest.out`
+ if test -z "$ac_err"; then
+   rm -rf conftest*
+@@ -4694,7 +4851,11 @@
+ s%@host_cpu@%$host_cpu%g
+ s%@host_vendor@%$host_vendor%g
+ s%@host_os@%$host_os%g
++s%@SID_OBJ@%$SID_OBJ%g
++s%@RESID_OBJ@%$RESID_OBJ%g
++s%@RESID_LIB@%$RESID_LIB%g
+ s%@CC@%$CC%g
++s%@CXX@%$CXX%g
+ s%@CPP@%$CPP%g
+ s%@AR@%$AR%g
+ s%@RANLIB@%$RANLIB%g
+diff -ruN vice-0.14.2/src/configure.in vice-0.14.2-resid/src/configure.in
+--- vice-0.14.2/src/configure.in	Wed Mar 11 21:59:28 1998
++++ vice-0.14.2-resid/src/configure.in	Sun Jun  7 23:57:45 1998
+@@ -22,7 +22,8 @@
+ AC_ARG_ENABLE(16bpp,[  --enable-16bpp          enable 16-bit only display depth support])
+ AC_ARG_ENABLE(24bpp,[  --enable-24bpp          enable 24-bit only display depth support])
+ AC_ARG_ENABLE(textfield,[  --disable-textfield     disable enhanced text field widget])
+-AC_ARG_ENABLE(xaw3d, [  --with-xaw3d            use Xaw3d library instead of plain Xaw])
++AC_ARG_WITH(resid, [  --with-resid            use reSID library for sound in x64])
++AC_ARG_WITH(xaw3d, [  --with-xaw3d            use Xaw3d library instead of plain Xaw])
+ 
+ if test "$enable_autobpp" = "yes"; then
+   AC_DEFINE(X_DISPLAY_DEPTH, 0)
+@@ -44,6 +45,20 @@
+   echo "using ugly Athena text widget."
+ fi
+ 
++dnl reSID library.
++if test "$with_resid" = yes; then
++  SID_OBJ=
++  RESID_OBJ="6581.o"
++  RESID_LIB="-lmos6581"
++else
++  SID_OBJ="sid.o"
++  RESID_OBJ=
++  RESID_LIB=
++fi
++AC_SUBST(SID_OBJ)
++AC_SUBST(RESID_OBJ)
++AC_SUBST(RESID_LIB)
++
+ dnl Setup go32 crosscompiling.
+ 
+ if test "$host_vendor" = "go32" -o "$host_vendor" = "msdos"; then
+@@ -109,6 +124,12 @@
+ 
+   fi
+ 
++fi
++
++dnl Checks for C++ compiler.
++AC_PROG_CXX
++if test "$GXX" = yes -a "$GCC" = yes; then
++  CXXFLAGS=$CCFLAGS
+ fi
+ 
+ dnl Check for needed external programs.

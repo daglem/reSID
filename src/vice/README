@@ -1,0 +1,7 @@
+This is a patch for VICE to use reSID for sound in x64.
+
+Note:
+1. A processor comparable in speed to a Pentium II is needed for this.
+2. Turn off "Enable adaptive playback"; this sounds awful.
+3. Selecting "SID Model"/"8580 (new)" makes no difference.
+4. Turn "Emulate SID filters" off if you have problems with speed.
