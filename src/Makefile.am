@@ -1,8 +1,10 @@
 ## Process this file with automake to create Makefile.in
 
-lib_LIBRARIES = libresid.a
+lib_LTLIBRARIES = libresid.la
 
-libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc extfilt.cc pot.cc version.cc $(noinst_DATA:.dat=.cc)
+libresid_la_LDFLAGS = -version-info $(LTVERSION)
+
+libresid_la_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc extfilt.cc pot.cc version.cc $(noinst_DATA:.dat=.cc)
 
 BUILT_SOURCES = $(noinst_DATA:.dat=.cc)
 
