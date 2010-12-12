@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2004  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -17,8 +17,13 @@
 //  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 //  ---------------------------------------------------------------------------
 
+#define __SID_CC__
+
 #include "sid.h"
 #include <math.h>
+
+namespace reSID
+{
 
 // ----------------------------------------------------------------------------
 // Constructor.
@@ -29,6 +34,7 @@ SID::SID()
   sample = 0;
   fir = 0;
 
+  sid_model = MOS6581;
   voice[0].set_sync_source(&voice[2]);
   voice[1].set_sync_source(&voice[0]);
   voice[2].set_sync_source(&voice[1]);
@@ -37,8 +43,7 @@ SID::SID()
 
   bus_value = 0;
   bus_value_ttl = 0;
-
-  ext_in = 0;
+  write_pipeline = 0;
 }
 
 
@@ -57,12 +62,13 @@ SID::~SID()
 // ----------------------------------------------------------------------------
 void SID::set_chip_model(chip_model model)
 {
+  sid_model = model;
+
   for (int i = 0; i < 3; i++) {
     voice[i].set_chip_model(model);
   }
 
   filter.set_chip_model(model);
-  extfilt.set_chip_model(model);
 }
 
 
@@ -88,43 +94,18 @@ void SID::reset()
 // Note that to mix in an external audio signal, the signal should be
 // resampled to 1MHz first to avoid sampling noise.
 // ----------------------------------------------------------------------------
-void SID::input(int sample)
+void SID::input(short sample)
 {
-  // Voice outputs are 20 bits. Scale up to match three voices in order
-  // to facilitate simulation of the MOS8580 "digi boost" hardware hack.
-  ext_in = (sample << 4)*3;
+  // The input can be used to simulate the MOS8580 "digi boost" hardware hack.
+  filter.input(sample);
 }
 
 // ----------------------------------------------------------------------------
-// Read sample from audio output.
-// Both 16-bit and n-bit output is provided.
+// Read 16-bit sample from audio output.
 // ----------------------------------------------------------------------------
-int SID::output()
+short SID::output()
 {
-  const int range = 1 << 16;
-  const int half = range >> 1;
-  int sample = extfilt.output()/((4095*255 >> 7)*3*15*2/range);
-  if (sample >= half) {
-    return half - 1;
-  }
-  if (sample < -half) {
-    return -half;
-  }
-  return sample;
-}
-
-int SID::output(int bits)
-{
-  const int range = 1 << bits;
-  const int half = range >> 1;
-  int sample = extfilt.output()/((4095*255 >> 7)*3*15*2/range);
-  if (sample >= half) {
-    return half - 1;
-  }
-  if (sample < -half) {
-    return -half;
-  }
-  return sample;
+  return extfilt.output();
 }
 
 
@@ -143,7 +124,7 @@ int SID::output(int bits)
 // would have to be done immediately after a write to the same register
 // (remember that an intermediate write to another register would yield that
 // value instead). With this in mind we return the last value written to
-// any SID register for $2000 cycles without modeling the bit fading.
+// any SID register for $4000 cycles without modeling the bit fading.
 // ----------------------------------------------------------------------------
 reg8 SID::read(reg8 offset)
 {
@@ -164,91 +145,114 @@ reg8 SID::read(reg8 offset)
 
 // ----------------------------------------------------------------------------
 // Write registers.
+// Writes are one cycle delayed on the MOS8580. This is only modeled for
+// single cycle clocking.
 // ----------------------------------------------------------------------------
 void SID::write(reg8 offset, reg8 value)
 {
+  write_address = offset;
   bus_value = value;
-  bus_value_ttl = 0x2000;
+  bus_value_ttl = 0x4000;
 
-  switch (offset) {
+  if (sid_model == MOS8580) {
+    // One cycle pipeline delay on the MOS8580; delay write.
+    write_pipeline = 1;
+  }
+  else {
+    // No pipeline delay on the MOS6581; write immediately.
+    write();
+  }
+}
+
+
+// ----------------------------------------------------------------------------
+// Write registers.
+// ----------------------------------------------------------------------------
+RESID_INLINE
+void SID::write()
+{
+  switch (write_address) {
   case 0x00:
-    voice[0].wave.writeFREQ_LO(value);
+    voice[0].wave.writeFREQ_LO(bus_value);
     break;
   case 0x01:
-    voice[0].wave.writeFREQ_HI(value);
+    voice[0].wave.writeFREQ_HI(bus_value);
     break;
   case 0x02:
-    voice[0].wave.writePW_LO(value);
+    voice[0].wave.writePW_LO(bus_value);
     break;
   case 0x03:
-    voice[0].wave.writePW_HI(value);
+    voice[0].wave.writePW_HI(bus_value);
     break;
   case 0x04:
-    voice[0].writeCONTROL_REG(value);
+    voice[0].writeCONTROL_REG(bus_value);
     break;
   case 0x05:
-    voice[0].envelope.writeATTACK_DECAY(value);
+    voice[0].envelope.writeATTACK_DECAY(bus_value);
     break;
   case 0x06:
-    voice[0].envelope.writeSUSTAIN_RELEASE(value);
+    voice[0].envelope.writeSUSTAIN_RELEASE(bus_value);
     break;
   case 0x07:
-    voice[1].wave.writeFREQ_LO(value);
+    voice[1].wave.writeFREQ_LO(bus_value);
     break;
   case 0x08:
-    voice[1].wave.writeFREQ_HI(value);
+    voice[1].wave.writeFREQ_HI(bus_value);
     break;
   case 0x09:
-    voice[1].wave.writePW_LO(value);
+    voice[1].wave.writePW_LO(bus_value);
     break;
   case 0x0a:
-    voice[1].wave.writePW_HI(value);
+    voice[1].wave.writePW_HI(bus_value);
     break;
   case 0x0b:
-    voice[1].writeCONTROL_REG(value);
+    voice[1].writeCONTROL_REG(bus_value);
     break;
   case 0x0c:
-    voice[1].envelope.writeATTACK_DECAY(value);
+    voice[1].envelope.writeATTACK_DECAY(bus_value);
     break;
   case 0x0d:
-    voice[1].envelope.writeSUSTAIN_RELEASE(value);
+    voice[1].envelope.writeSUSTAIN_RELEASE(bus_value);
     break;
   case 0x0e:
-    voice[2].wave.writeFREQ_LO(value);
+    voice[2].wave.writeFREQ_LO(bus_value);
     break;
   case 0x0f:
-    voice[2].wave.writeFREQ_HI(value);
+    voice[2].wave.writeFREQ_HI(bus_value);
     break;
   case 0x10:
-    voice[2].wave.writePW_LO(value);
+    voice[2].wave.writePW_LO(bus_value);
     break;
   case 0x11:
-    voice[2].wave.writePW_HI(value);
+    voice[2].wave.writePW_HI(bus_value);
     break;
   case 0x12:
-    voice[2].writeCONTROL_REG(value);
+    voice[2].writeCONTROL_REG(bus_value);
     break;
   case 0x13:
-    voice[2].envelope.writeATTACK_DECAY(value);
+    voice[2].envelope.writeATTACK_DECAY(bus_value);
     break;
   case 0x14:
-    voice[2].envelope.writeSUSTAIN_RELEASE(value);
+    voice[2].envelope.writeSUSTAIN_RELEASE(bus_value);
     break;
   case 0x15:
-    filter.writeFC_LO(value);
+    filter.writeFC_LO(bus_value);
     break;
   case 0x16:
-    filter.writeFC_HI(value);
+    filter.writeFC_HI(bus_value);
     break;
   case 0x17:
-    filter.writeRES_FILT(value);
+    filter.writeRES_FILT(bus_value);
     break;
   case 0x18:
-    filter.writeMODE_VOL(value);
+    filter.writeMODE_VOL(bus_value);
     break;
   default:
     break;
   }
+
+  // Tell clock() that the pipeline is empty.
+  write_pipeline = 0;
 }
 
 
@@ -265,10 +269,18 @@ SID::State::State()
 
   bus_value = 0;
   bus_value_ttl = 0;
+  write_pipeline = 0;
+  write_address = 0;
+  voice_mask = 0xff;
 
   for (i = 0; i < 3; i++) {
     accumulator[i] = 0;
-    shift_register[i] = 0x7ffff8;
+    shift_register[i] = 0x7fffff;
+    shift_register_reset[i] = 0;
+    shift_pipeline[i] = 0;
+    pulse_output[i] = 0;
+    floating_output_ttl[i] = 0;
+
     rate_counter[i] = 0;
     rate_counter_period[i] = 9;
     exponential_counter[i] = 0;
@@ -276,6 +288,7 @@ SID::State::State()
     envelope_counter[i] = 0;
     envelope_state[i] = EnvelopeGenerator::RELEASE;
     hold_zero[i] = true;
+    envelope_pipeline[i] = 0;
   }
 }
 
@@ -308,12 +321,9 @@ SID::State SID::read_state()
   state.sid_register[j++] = filter.fc & 0x007;
   state.sid_register[j++] = filter.fc >> 3;
   state.sid_register[j++] = (filter.res << 4) | filter.filt;
-  state.sid_register[j++] =
-    (filter.voice3off ? 0x80 : 0)
-    | (filter.hp_bp_lp << 4)
-    | filter.vol;
+  state.sid_register[j++] = filter.mode | filter.vol;
 
-  // These registers are superfluous, but included for completeness.
+  // These registers are superfluous, but are included for completeness.
   for (; j < 0x1d; j++) {
     state.sid_register[j] = read(j);
   }
@@ -323,10 +333,18 @@ SID::State SID::read_state()
 
   state.bus_value = bus_value;
   state.bus_value_ttl = bus_value_ttl;
+  state.write_pipeline = write_pipeline;
+  state.write_address = write_address;
+  state.voice_mask = filter.voice_mask;
 
   for (i = 0; i < 3; i++) {
     state.accumulator[i] = voice[i].wave.accumulator;
     state.shift_register[i] = voice[i].wave.shift_register;
+    state.shift_register_reset[i] = voice[i].wave.shift_register_reset;
+    state.shift_pipeline[i] = voice[i].wave.shift_pipeline;
+    state.pulse_output[i] = voice[i].wave.pulse_output;
+    state.floating_output_ttl[i] = voice[i].wave.floating_output_ttl;
+
     state.rate_counter[i] = voice[i].envelope.rate_counter;
     state.rate_counter_period[i] = voice[i].envelope.rate_period;
     state.exponential_counter[i] = voice[i].envelope.exponential_counter;
@@ -334,6 +352,7 @@ SID::State SID::read_state()
     state.envelope_counter[i] = voice[i].envelope.envelope_counter;
     state.envelope_state[i] = voice[i].envelope.state;
     state.hold_zero[i] = voice[i].envelope.hold_zero;
+    state.envelope_pipeline[i] = voice[i].envelope.envelope_pipeline;
   }
 
   return state;
@@ -353,10 +372,18 @@ void SID::write_state(const State& state)
 
   bus_value = state.bus_value;
   bus_value_ttl = state.bus_value_ttl;
+  write_pipeline = state.write_pipeline;
+  write_address = state.write_address;
+  filter.set_voice_mask(state.voice_mask);
 
   for (i = 0; i < 3; i++) {
     voice[i].wave.accumulator = state.accumulator[i];
     voice[i].wave.shift_register = state.shift_register[i];
+    voice[i].wave.shift_register_reset = state.shift_register_reset[i];
+    voice[i].wave.shift_pipeline = state.shift_pipeline[i];
+    voice[i].wave.pulse_output = state.pulse_output[i];
+    voice[i].wave.floating_output_ttl = state.floating_output_ttl[i];
+
     voice[i].envelope.rate_counter = state.rate_counter[i];
     voice[i].envelope.rate_period = state.rate_counter_period[i];
     voice[i].envelope.exponential_counter = state.exponential_counter[i];
@@ -364,7 +391,19 @@ void SID::write_state(const State& state)
     voice[i].envelope.envelope_counter = state.envelope_counter[i];
     voice[i].envelope.state = state.envelope_state[i];
     voice[i].envelope.hold_zero = state.hold_zero[i];
+    voice[i].envelope.envelope_pipeline = state.envelope_pipeline[i];
   }
+}
+
+
+// ----------------------------------------------------------------------------
+// Mask for voices routed into the filter / audio output stage.
+// Used to physically connect/disconnect EXT IN, and for test purposed
+// (voice muting).
+// ----------------------------------------------------------------------------
+void SID::set_voice_mask(reg4 mask)
+{
+  filter.set_voice_mask(mask);
 }
 
 
@@ -438,7 +477,7 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
 				  double filter_scale)
 {
   // Check resampling constraints.
-  if (method == SAMPLE_RESAMPLE_INTERPOLATE || method == SAMPLE_RESAMPLE_FAST)
+  if (method == SAMPLE_RESAMPLE || method == SAMPLE_RESAMPLE_FASTMEM)
   {
     // Check whether the sample ring buffer would overfill.
     if (FIR_N*clock_freq/sample_freq >= RINGSIZE) {
@@ -475,7 +514,7 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
   sample_prev = 0;
 
   // FIR initialization is only necessary for resampling.
-  if (method != SAMPLE_RESAMPLE_INTERPOLATE && method != SAMPLE_RESAMPLE_FAST)
+  if (method != SAMPLE_RESAMPLE && method != SAMPLE_RESAMPLE_FASTMEM)
   {
     delete[] sample;
     delete[] fir;
@@ -514,10 +553,10 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
   fir_N = int(N*f_cycles_per_sample) + 1;
   fir_N |= 1;
 
-  // We clamp the filter table resolution to 2^n, making the fixpoint
+  // We clamp the filter table resolution to 2^n, making the fixed point
   // sample_offset a whole multiple of the filter table resolution.
-  int res = method == SAMPLE_RESAMPLE_INTERPOLATE ?
-    FIR_RES_INTERPOLATE : FIR_RES_FAST;
+  int res = method == SAMPLE_RESAMPLE ?
+    FIR_RES : FIR_RES_FASTMEM;
   int n = (int)ceil(log(res/f_cycles_per_sample)/log(2));
   fir_RES = 1 << n;
 
@@ -541,7 +580,7 @@ bool SID::set_sampling_parameters(double clock_freq, sampling_method method,
 	fabs(wt) >= 1e-6 ? sin(wt)/wt : 1;
       double val =
 	(1 << FIR_SHIFT)*filter_scale*f_samples_per_cycle*wc/pi*sincwt*Kaiser;
-      fir[fir_offset + j] = short(val + 0.5);
+      fir[fir_offset + j] = round(val);
     }
   }
 
@@ -579,36 +618,11 @@ void SID::adjust_sampling_frequency(double sample_freq)
 
 
 // ----------------------------------------------------------------------------
-// Return array of default spline interpolation points to map FC to
-// filter cutoff frequency.
-// ----------------------------------------------------------------------------
-void SID::fc_default(const fc_point*& points, int& count)
-{
-  filter.fc_default(points, count);
-}
-
-
-// ----------------------------------------------------------------------------
-// Return FC spline plotter object.
-// ----------------------------------------------------------------------------
-PointPlotter<sound_sample> SID::fc_plotter()
-{
-  return filter.fc_plotter();
-}
-
-
-// ----------------------------------------------------------------------------
 // SID clocking - 1 cycle.
 // ----------------------------------------------------------------------------
 void SID::clock()
 {
   int i;
-
-  // Age bus value.
-  if (--bus_value_ttl <= 0) {
-    bus_value = 0;
-    bus_value_ttl = 0;
-  }
 
   // Clock amplitude modulators.
   for (i = 0; i < 3; i++) {
@@ -625,11 +639,26 @@ void SID::clock()
     voice[i].wave.synchronize();
   }
 
+  // Calculate waveform output.
+  for (i = 0; i < 3; i++) {
+    voice[i].wave.set_waveform_output();
+  }
+
   // Clock filter.
-  filter.clock(voice[0].output(), voice[1].output(), voice[2].output(), ext_in);
+  filter.clock(voice[0].output(), voice[1].output(), voice[2].output());
 
   // Clock external filter.
   extfilt.clock(filter.output());
+
+  // Pipelined writes on the MOS8580.
+  if (unlikely(write_pipeline)) {
+    write();
+  }
+
+  // Age bus value.
+  if (unlikely(!--bus_value_ttl)) {
+    bus_value = 0;
+  }
 }
 
 
@@ -640,13 +669,22 @@ void SID::clock(cycle_count delta_t)
 {
   int i;
 
-  if (delta_t <= 0) {
+  // Pipelined writes on the MOS8580.
+  if (unlikely(write_pipeline) && likely(delta_t > 0)) {
+    // Step one cycle by a recursive call to ourselves.
+    write_pipeline = 0;
+    clock(1);
+    write();
+    delta_t -= 1;
+  }
+
+  if (unlikely(delta_t <= 0)) {
     return;
   }
 
   // Age bus value.
   bus_value_ttl -= delta_t;
-  if (bus_value_ttl <= 0) {
+  if (unlikely(bus_value_ttl <= 0)) {
     bus_value = 0;
     bus_value_ttl = 0;
   }
@@ -670,7 +708,7 @@ void SID::clock(cycle_count delta_t)
 
       // It is only necessary to clock on the MSB of an oscillator that is
       // a sync source and has freq != 0.
-      if (!(wave.sync_dest->sync && wave.freq)) {
+      if (likely(!(wave.sync_dest->sync && wave.freq))) {
 	continue;
       }
 
@@ -682,11 +720,11 @@ void SID::clock(cycle_count delta_t)
 	(accumulator & 0x800000 ? 0x1000000 : 0x800000) - accumulator;
 
       cycle_count delta_t_next = delta_accumulator/freq;
-      if (delta_accumulator%freq) {
+      if (likely(delta_accumulator%freq)) {
 	++delta_t_next;
       }
 
-      if (delta_t_next < delta_t_min) {
+      if (unlikely(delta_t_next < delta_t_min)) {
 	delta_t_min = delta_t_next;
       }
     }
@@ -704,9 +742,14 @@ void SID::clock(cycle_count delta_t)
     delta_t_osc -= delta_t_min;
   }
 
+  // Calculate waveform output.
+  for (i = 0; i < 3; i++) {
+    voice[i].wave.set_waveform_output(delta_t);
+  }
+
   // Clock filter.
   filter.clock(delta_t,
-	       voice[0].output(), voice[1].output(), voice[2].output(), ext_in);
+	       voice[0].output(), voice[1].output(), voice[2].output());
 
   // Clock external filter.
   extfilt.clock(delta_t, filter.output());
@@ -715,7 +758,7 @@ void SID::clock(cycle_count delta_t)
 
 // ----------------------------------------------------------------------------
 // SID clocking with audio sampling.
-// Fixpoint arithmetics is used.
+// Fixed point arithmetics are used.
 //
 // The example below shows how to clock the SID a specified amount of cycles
 // while producing audio output:
@@ -735,10 +778,10 @@ int SID::clock(cycle_count& delta_t, short* buf, int n, int interleave)
     return clock_fast(delta_t, buf, n, interleave);
   case SAMPLE_INTERPOLATE:
     return clock_interpolate(delta_t, buf, n, interleave);
-  case SAMPLE_RESAMPLE_INTERPOLATE:
-    return clock_resample_interpolate(delta_t, buf, n, interleave);
-  case SAMPLE_RESAMPLE_FAST:
-    return clock_resample_fast(delta_t, buf, n, interleave);
+  case SAMPLE_RESAMPLE:
+    return clock_resample(delta_t, buf, n, interleave);
+  case SAMPLE_RESAMPLE_FASTMEM:
+    return clock_resample_fastmem(delta_t, buf, n, interleave);
   }
 }
 
@@ -754,10 +797,10 @@ int SID::clock_fast(cycle_count& delta_t, short* buf, int n,
   for (;;) {
     cycle_count next_sample_offset = sample_offset + cycles_per_sample + (1 << (FIXP_SHIFT - 1));
     cycle_count delta_t_sample = next_sample_offset >> FIXP_SHIFT;
-    if (delta_t_sample > delta_t) {
+    if (unlikely(delta_t_sample > delta_t)) {
       break;
     }
-    if (s >= n) {
+    if (unlikely(s >= n)) {
       return s;
     }
     clock(delta_t_sample);
@@ -792,16 +835,16 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n,
   for (;;) {
     cycle_count next_sample_offset = sample_offset + cycles_per_sample;
     cycle_count delta_t_sample = next_sample_offset >> FIXP_SHIFT;
-    if (delta_t_sample > delta_t) {
+    if (unlikely(delta_t_sample > delta_t)) {
       break;
     }
-    if (s >= n) {
+    if (unlikely(s >= n)) {
       return s;
     }
     for (i = 0; i < delta_t_sample - 1; i++) {
       clock();
     }
-    if (i < delta_t_sample) {
+    if (likely(i < delta_t_sample)) {
       sample_prev = output();
       clock();
     }
@@ -818,7 +861,7 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n,
   for (i = 0; i < delta_t - 1; i++) {
     clock();
   }
-  if (i < delta_t) {
+  if (likely(i < delta_t)) {
     sample_prev = output();
     clock();
   }
@@ -842,7 +885,7 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n,
 // http://www-ccrma.stanford.edu/~jos/resample/
 //
 // By building shifted FIR tables with samples according to the
-// sampling frequency, this implementation dramatically reduces the
+// sampling frequency, the implementation below dramatically reduces the
 // computational effort in the filter convolutions, without any loss
 // of accuracy. The filter convolutions are also vectorizable on
 // current hardware.
@@ -865,25 +908,24 @@ int SID::clock_interpolate(cycle_count& delta_t, short* buf, int n,
 // implementation dependent in the C++ standard.
 // ----------------------------------------------------------------------------
 RESID_INLINE
-int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
-				    int interleave)
+int SID::clock_resample(cycle_count& delta_t, short* buf, int n,
+			int interleave)
 {
   int s = 0;
 
   for (;;) {
     cycle_count next_sample_offset = sample_offset + cycles_per_sample;
     cycle_count delta_t_sample = next_sample_offset >> FIXP_SHIFT;
-    if (delta_t_sample > delta_t) {
+    if (unlikely(delta_t_sample > delta_t)) {
       break;
     }
-    if (s >= n) {
+    if (unlikely(s >= n)) {
       return s;
     }
     for (int i = 0; i < delta_t_sample; i++) {
       clock();
       sample[sample_index] = sample[sample_index + RINGSIZE] = output();
-      ++sample_index;
-      sample_index &= 0x3fff;
+      ++sample_index &= RINGMASK;
     }
     delta_t -= delta_t_sample;
     sample_offset = next_sample_offset & FIXP_MASK;
@@ -891,7 +933,7 @@ int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
     int fir_offset = sample_offset*fir_RES >> FIXP_SHIFT;
     int fir_offset_rmd = sample_offset*fir_RES & FIXP_MASK;
     short* fir_start = fir + fir_offset*fir_N;
-    short* sample_start = sample + sample_index - fir_N + RINGSIZE;
+    short* sample_start = sample + sample_index - fir_N - 1 + RINGSIZE;
 
     // Convolution with filter impulse response.
     int v1 = 0;
@@ -900,10 +942,10 @@ int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
     }
 
     // Use next FIR table, wrap around to first FIR table using
-    // previous sample.
-    if (++fir_offset == fir_RES) {
+    // next sample.
+    if (unlikely(++fir_offset == fir_RES)) {
       fir_offset = 0;
-      --sample_start;
+      ++sample_start;
     }
     fir_start = fir + fir_offset*fir_N;
 
@@ -922,10 +964,10 @@ int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
 
     // Saturated arithmetics to guard against 16 bit sample overflow.
     const int half = 1 << 15;
-    if (v >= half) {
+    if (unlikely(v >= half)) {
       v = half - 1;
     }
-    else if (v < -half) {
+    else if (unlikely(v < -half)) {
       v = -half;
     }
 
@@ -935,8 +977,7 @@ int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
   for (int i = 0; i < delta_t; i++) {
     clock();
     sample[sample_index] = sample[sample_index + RINGSIZE] = output();
-    ++sample_index;
-    sample_index &= 0x3fff;
+    ++sample_index &= RINGMASK;
   }
   sample_offset -= delta_t << FIXP_SHIFT;
   delta_t = 0;
@@ -948,25 +989,24 @@ int SID::clock_resample_interpolate(cycle_count& delta_t, short* buf, int n,
 // SID clocking with audio sampling - cycle based with audio resampling.
 // ----------------------------------------------------------------------------
 RESID_INLINE
-int SID::clock_resample_fast(cycle_count& delta_t, short* buf, int n,
-			     int interleave)
+int SID::clock_resample_fastmem(cycle_count& delta_t, short* buf, int n,
+				int interleave)
 {
   int s = 0;
 
   for (;;) {
     cycle_count next_sample_offset = sample_offset + cycles_per_sample;
     cycle_count delta_t_sample = next_sample_offset >> FIXP_SHIFT;
-    if (delta_t_sample > delta_t) {
+    if (unlikely(delta_t_sample > delta_t)) {
       break;
     }
-    if (s >= n) {
+    if (unlikely(s >= n)) {
       return s;
     }
     for (int i = 0; i < delta_t_sample; i++) {
       clock();
       sample[sample_index] = sample[sample_index + RINGSIZE] = output();
-      ++sample_index;
-      sample_index &= 0x3fff;
+      ++sample_index &= RINGMASK;
     }
     delta_t -= delta_t_sample;
     sample_offset = next_sample_offset & FIXP_MASK;
@@ -985,10 +1025,10 @@ int SID::clock_resample_fast(cycle_count& delta_t, short* buf, int n,
 
     // Saturated arithmetics to guard against 16 bit sample overflow.
     const int half = 1 << 15;
-    if (v >= half) {
+    if (unlikely(v >= half)) {
       v = half - 1;
     }
-    else if (v < -half) {
+    else if (unlikely(v < -half)) {
       v = -half;
     }
 
@@ -998,10 +1038,11 @@ int SID::clock_resample_fast(cycle_count& delta_t, short* buf, int n,
   for (int i = 0; i < delta_t; i++) {
     clock();
     sample[sample_index] = sample[sample_index + RINGSIZE] = output();
-    ++sample_index;
-    sample_index &= 0x3fff;
+    ++sample_index &= RINGMASK;
   }
   sample_offset -= delta_t << FIXP_SHIFT;
   delta_t = 0;
   return s;
 }
+
+} // namespace reSID

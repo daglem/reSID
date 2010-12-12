@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 1999  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -20,19 +20,37 @@
 #ifndef __SIDDEFS_H__
 #define __SIDDEFS_H__
 
-// Define bool, true, and false for C++ compilers that lack these keywords.
-#define RESID_HAVE_BOOL 1
+// Compilation configuration.
+#define RESID_INLINING 1
+#define RESID_INLINE inline
+#define RESID_BRANCH_HINTS 1
 
-#if !RESID_HAVE_BOOL
+// Compiler specifics.
+#define HAVE_BOOL 1
+#define HAVE_BUILTIN_EXPECT 1
+
+// Define bool, true, and false for C++ compilers that lack these keywords.
+#if !HAVE_BOOL
 typedef int bool;
 const bool true = 1;
 const bool false = 0;
 #endif
 
+// Branch prediction macros, lifted off the Linux kernel.
+#if RESID_BRANCH_HINTS && HAVE_BUILTIN_EXPECT
+#define likely(x)      __builtin_expect(!!(x), 1)
+#define unlikely(x)    __builtin_expect(!!(x), 0)
+#else
+#define likely(x)      (x)
+#define unlikely(x)    (x)
+#endif
+
+namespace reSID {
+
 // We could have used the smallest possible data type for each SID register,
 // however this would give a slower engine because of data type conversions.
-// An int is assumed to be at least 32 bits (necessary in the types reg24,
-// cycle_count, and sound_sample). GNU does not support 16-bit machines
+// An int is assumed to be at least 32 bits (necessary in the types reg24
+// and cycle_count). GNU does not support 16-bit machines
 // (GNU Coding Standards: Portability between CPUs), so this should be
 // a valid assumption.
 
@@ -43,13 +61,15 @@ typedef unsigned int reg16;
 typedef unsigned int reg24;
 
 typedef int cycle_count;
-typedef int sound_sample;
-typedef sound_sample fc_point[2];
+typedef short short_point[2];
+typedef double double_point[2];
 
 enum chip_model { MOS6581, MOS8580 };
 
 enum sampling_method { SAMPLE_FAST, SAMPLE_INTERPOLATE,
-		       SAMPLE_RESAMPLE_INTERPOLATE, SAMPLE_RESAMPLE_FAST };
+		       SAMPLE_RESAMPLE, SAMPLE_RESAMPLE_FASTMEM };
+
+} // namespace reSID
 
 extern "C"
 {
@@ -59,9 +79,5 @@ extern const char* resid_version_string;
 const char* resid_version_string = VERSION;
 #endif
 }
-
-// Inlining on/off.
-#define RESID_INLINING 1
-#define RESID_INLINE inline
 
 #endif // not __SIDDEFS_H__
