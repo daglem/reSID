@@ -80,4 +80,8 @@ const char* resid_version_string = VERSION;
 #endif
 }
 
+#if @HAVE_SQRTF_PROTOTYPE@
+#define HAVE_SQRTF_PROTOTYPE
+#endif
+
 #endif // not VICE__SIDDEFS_H__
