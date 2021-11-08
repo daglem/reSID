@@ -1,3 +1,7 @@
+# reSID
+
+## MOS 6581 / 8580 SID software emulation
+
 This repository is intended to become the official source for the
 reSID MOS6581 / MOS8580 SID emulator. However for now, I recommend
 fetching reSID from [VICE](https://vice-emu.sourceforge.io/) :-)
