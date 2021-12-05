@@ -20,7 +20,7 @@
 #ifndef RESID_EXTFILT_H
 #define RESID_EXTFILT_H
 
-#include "resid-config.h"
+#include "siddefs.h"
 
 namespace reSID
 {

@@ -19,4 +19,4 @@
 
 #define RESID_VERSION_CC
 
-#include "resid-config.h"
+#include "siddefs.h"

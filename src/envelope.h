@@ -20,7 +20,7 @@
 #ifndef RESID_ENVELOPE_H
 #define RESID_ENVELOPE_H
 
-#include "resid-config.h"
+#include "siddefs.h"
 
 namespace reSID
 {

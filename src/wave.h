@@ -20,7 +20,7 @@
 #ifndef RESID_WAVE_H
 #define RESID_WAVE_H
 
-#include "resid-config.h"
+#include "siddefs.h"
 
 namespace reSID
 {
