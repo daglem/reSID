@@ -4,15 +4,15 @@ dnl
 dnl Process this file with autoconf to produce a configure script.
 
 dnl Use Autoconf
-AC_PREREQ([2.62])
+AC_PREREQ([2.69])
 AC_INIT([reSID], [1.0-pre1], [resid@nimrod.no])
 AC_CONFIG_SRCDIR([sid.h])
 
 dnl Use Automake
-AM_INIT_AUTOMAKE([1.11])
+AM_INIT_AUTOMAKE([1.16.2])
 
 dnl Use Libtool
-LT_PREREQ([2.2.2])
+LT_PREREQ([2.4.6])
 LT_INIT([disable-shared])
 AC_CONFIG_MACRO_DIR([m4])
 AC_SUBST([LTVERSION], [6:0:0])
@@ -66,12 +66,12 @@ AS_IF([test "$GXX" = yes -a "$resid_test_CXXFLAGS" != set],
   [resid_save_CXXFLAGS=$CXXFLAGS
    CXXFLAGS="-g -Wall -O3$march -ffast-math -fno-exceptions"
    AC_MSG_CHECKING([whether g++ accepts $CXXFLAGS])
-   AC_COMPILE_IFELSE([int test;],
+   AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int test;]])],
                      [AC_MSG_RESULT(yes)],
                      [AC_MSG_RESULT(no)
                       CXXFLAGS="-g -Wall -O3 -fno-exceptions"
                       AC_MSG_CHECKING([whether g++ accepts $CXXFLAGS])
-                      AC_COMPILE_IFELSE([int test;],
+                      AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int test;]])],
                                         [AC_MSG_RESULT(yes)],
                                         [AC_MSG_RESULT(no)
                                          CXXFLAGS=$resid_save_CXXFLAGS])])])
@@ -90,7 +90,7 @@ AS_IF([test $ac_cv_sizeof_int -lt 4],
   AC_MSG_ERROR([only 32 bit or better CPUs are supported]))
 
 AC_CACHE_CHECK([for working bool], [resid_cv_cxx_bool],
-  [AC_COMPILE_IFELSE([bool flag;],
+  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[bool flag;]])],
     [resid_cv_cxx_bool=yes], [resid_cv_cxx_bool=no])])
 
 AS_IF([test "$resid_cv_cxx_bool" = no],
@@ -98,7 +98,7 @@ AS_IF([test "$resid_cv_cxx_bool" = no],
   [AC_SUBST([HAVE_BOOL], [1])])
 
 AC_CACHE_CHECK([for __builtin_expect], [resid_cv_builtin_expect],
-  [AC_COMPILE_IFELSE([int main() { __builtin_expect(0, 0); }],
+  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int main() { __builtin_expect(0, 0); }]])],
     [resid_cv_builtin_expect=yes], [resid_cv_builtin_expect=no])])
 
 AS_IF([test "$resid_cv_builtin_expect" = no],
