@@ -90,14 +90,6 @@ AC_CHECK_SIZEOF([int], [4])
 AS_IF([test $ac_cv_sizeof_int -lt 4],
   AC_MSG_ERROR([only 32 bit or better CPUs are supported]))
 
-AC_CACHE_CHECK([for working bool], [resid_cv_cxx_bool],
-  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[bool flag;]])],
-    [resid_cv_cxx_bool=yes], [resid_cv_cxx_bool=no])])
-
-AS_IF([test "$resid_cv_cxx_bool" = no],
-  [AC_SUBST([HAVE_BOOL], [0])],
-  [AC_SUBST([HAVE_BOOL], [1])])
-
 AC_CACHE_CHECK([for __builtin_expect], [resid_cv_builtin_expect],
   [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int main() { __builtin_expect(0, 0); }]])],
     [resid_cv_builtin_expect=yes], [resid_cv_builtin_expect=no])])
@@ -105,6 +97,23 @@ AC_CACHE_CHECK([for __builtin_expect], [resid_cv_builtin_expect],
 AS_IF([test "$resid_cv_builtin_expect" = no],
   [AC_SUBST([HAVE_BUILTIN_EXPECT], [0])],
   [AC_SUBST([HAVE_BUILTIN_EXPECT], [1])])
+
+AC_CACHE_CHECK([for consteval], [resid_cv_cxx_consteval],
+  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[consteval int sqr(int n) { return n*n; }]])],
+    [resid_cv_cxx_consteval=yes], [resid_cv_cxx_consteval=no])])
+
+AC_CACHE_CHECK([for constexpr exp() and log2()], [resid_cv_cxx_constexpr_cmath],
+  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <cmath>
+                                       constexpr double n = log2(10.0)*exp(-10.0);]])],
+    [resid_cv_cxx_constexpr_cmath=yes], [resid_cv_cxx_constexpr_cmath=no])])
+
+AS_IF([test "$resid_cv_cxx_constexpr_cmath" = no],
+  [AC_SUBST([RESID_CONSTEXPR], [const])
+   AC_SUBST([RESID_CONSTEVAL], [])],
+  [AC_SUBST([RESID_CONSTEXPR], ["static constexpr"])
+   AS_IF([test "$resid_cv_cxx_consteval" = no],
+     [AC_SUBST([RESID_CONSTEVAL], [constexpr])],
+     [AC_SUBST([RESID_CONSTEVAL], [consteval])])])
 
 dnl Checks for library functions.
 

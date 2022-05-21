@@ -31,15 +31,6 @@ ExternalFilter::ExternalFilter()
 {
   reset();
   enable_filter(true);
-
-  // Low-pass:  R = 10kOhm, C = 1000pF; w0l = 1/RC = 1/(1e4*1e-9) = 100 000
-  // High-pass: R = 10kOhm, C =   10uF; w0h = 1/RC = 1/(1e4*1e-5) =      10
-
-  // Assume a 1MHz clock.
-  // Cutoff frequency accuracy (4 bits) is traded off for filter signal
-  // accuracy (27 bits). This is crucial since w0lp and w0hp are so far apart.
-  w0lp_1_s7 = int(100000*1.0e-6*(1 << 7) + 0.5);
-  w0hp_1_s20 = int(10*1.0e-6*(1 << 20) + 0.5);
 }
 
 
@@ -58,8 +49,8 @@ void ExternalFilter::enable_filter(bool enable)
 void ExternalFilter::reset()
 {
   // State of filter.
-  Vlp = 0;
-  Vhp = 0;
+  vlp = 0;
+  vhp = 0;
 }
 
 } // namespace reSID

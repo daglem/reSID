@@ -26,15 +26,9 @@
 #define RESID_BRANCH_HINTS @RESID_BRANCH_HINTS@
 
 // Compiler specifics.
-#define HAVE_BOOL @HAVE_BOOL@
+#define RESID_CONSTEVAL @RESID_CONSTEVAL@
+#define RESID_CONSTEXPR @RESID_CONSTEXPR@
 #define HAVE_BUILTIN_EXPECT @HAVE_BUILTIN_EXPECT@
-
-// Define bool, true, and false for C++ compilers that lack these keywords.
-#if !HAVE_BOOL
-typedef int bool;
-const bool true = 1;
-const bool false = 0;
-#endif
 
 // Branch prediction macros, lifted off the Linux kernel.
 #if RESID_BRANCH_HINTS && HAVE_BUILTIN_EXPECT
