@@ -1,5 +1,7 @@
 ## Process this file with automake to create Makefile.in
 
+ACLOCAL_AMFLAGS = --install -I m4
+
 AR = @AR@
 
 noinst_LIBRARIES = libresid.a

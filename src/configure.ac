@@ -7,6 +7,8 @@ dnl Use Autoconf
 AC_PREREQ([2.69])
 AC_INIT([reSID], [1.0-pre1], [resid@nimrod.no])
 AC_CONFIG_SRCDIR([sid.h])
+AC_CONFIG_AUX_DIR([build-aux])
+AC_CONFIG_MACRO_DIR([m4])
 
 dnl Use Automake
 AM_INIT_AUTOMAKE([1.16.2])
@@ -14,7 +16,6 @@ AM_INIT_AUTOMAKE([1.16.2])
 dnl Use Libtool
 LT_PREREQ([2.4.6])
 LT_INIT([disable-shared])
-AC_CONFIG_MACRO_DIR([m4])
 AC_SUBST([LTVERSION], [6:0:0])
 
 dnl Use C++ for tests.
