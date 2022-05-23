@@ -107,6 +107,8 @@ public:
       }
 
       vbit[set_bit] = Vn;
+      // Single bit values, scaled by 2^4.
+      dac_bits[set_bit] = ((1 << bits) - 1)*Vn*(1 << 4) + 0.5;
     }
 
     // Calculate the voltage for any combination of bits by superpositioning.
@@ -119,7 +121,7 @@ public:
       }
 
       // Scale maximum output to 2^bits - 1.
-      dac[i] = (T)(((1 << bits) - 1)*Vo + 0.5);
+      dac_table[i] = (T)(((1 << bits) - 1)*Vo + 0.5);
     }
   }
 
@@ -127,16 +129,34 @@ public:
   // which currently depends on dynamic initialization.
   T& operator[](std::size_t pos)
   {
-    return dac[pos];
+    return dac_table[pos];
   }
 
+  // Read value from DAC lookup table.
   constexpr const T& operator[](std::size_t pos) const
   {
-    return dac[pos];
+    return dac_table[pos];
   }
 
+  // Calculate DAC value by bit superpositioning, as a template for
+  // FPGA implementations.
+  T operator()(T val) const
+  {
+    T bitsum = 0;
+    for (int bit = 0; bit < bits; bit++) {
+        bitsum += (val & 0x1) ? dac_bits[bit] : 0;
+        val >>= 1;
+    }
+
+    return (T)((bitsum + (1 << 3)) >> 4);
+  }
+
+  // Bit values, scaled by 2^4.
+  // Kept public for FPGA implementors.
+  T dac_bits[bits];
 private:
-  T dac[1 << bits];
+  // Lookup table, more suitable for CPU implementations.
+  T dac_table[1 << bits];
 };
 
 } // namespace reSID

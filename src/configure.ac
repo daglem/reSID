@@ -24,9 +24,7 @@ AC_LANG([C++])
 dnl Enable inlining.
 AC_ARG_ENABLE([inline],
   [AS_HELP_STRING([--enable-inline],
-    [enable inlining of functions [default=yes]])],
-  [],
-  [enable_inline=yes])
+    [enable inlining of functions [default=yes]])])
 
 AS_IF([test "$enable_inline" != no],
   [AC_SUBST([RESID_INLINING], [1])
@@ -48,13 +46,20 @@ AS_IF([test "$enable_arch" = no], [march=""],
 dnl Enable branch prediction hints.
 AC_ARG_ENABLE([branch-hints],
   [AS_HELP_STRING([--enable-branch-hints],
-    [enable static branch prediction hints [default=yes]])],
-  [],
-  [enable_branch_hints=yes])
+    [enable static branch prediction hints [default=yes]])])
 
 AS_IF([test "$enable_branch_hints" != no],
   [AC_SUBST([RESID_BRANCH_HINTS], [1])],
   [AC_SUBST([RESID_BRANCH_HINTS], [0])])
+
+dnl Enable FPGA code.
+AC_ARG_ENABLE([fpga-code],
+  [AS_HELP_STRING([--enable-fpga-code],
+    [enable code which can mapped to FPGA implementations [default=no]])])
+
+AS_IF([test "$enable_fpga_code" != yes],
+  [AC_SUBST([RESID_FPGA_CODE], [0])],
+  [AC_SUBST([RESID_FPGA_CODE], [1])])
 
 dnl Store CXXFLAGS status.
 resid_test_CXXFLAGS=${CXXFLAGS+set}

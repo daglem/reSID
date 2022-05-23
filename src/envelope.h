@@ -291,7 +291,12 @@ short EnvelopeGenerator::output()
 {
   // DAC imperfections are emulated by using envelope_counter as an index
   // into a DAC lookup table. readENV() uses envelope_counter directly.
+#if RESID_FPGA_CODE
+  // The FPGA code calculates the value by bit superpositioning.
+  return model_dac[sid_model](envelope_counter);
+#else
   return model_dac[sid_model][envelope_counter];
+#endif
 }
 
 RESID_INLINE

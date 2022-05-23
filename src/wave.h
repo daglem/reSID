@@ -594,7 +594,12 @@ short WaveformGenerator::output()
 {
   // DAC imperfections are emulated by using waveform_output as an index
   // into a DAC lookup table. readOSC() uses waveform_output directly.
+#if RESID_FPGA_CODE
+  // The FPGA code calculates the value by bit superpositioning.
+  return model_dac[sid_model](waveform_output);
+#else
   return model_dac[sid_model][waveform_output];
+#endif
 }
 
 #endif // RESID_INLINING || defined(RESID_WAVE_CC)
