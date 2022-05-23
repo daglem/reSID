@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 #define RESID_WAVE_H
 
 #include "siddefs.h"
+#include "dac.h"
 
 namespace reSID
 {
@@ -119,7 +120,7 @@ protected:
   unsigned short* wave;
   static unsigned short model_wave[2][8][1 << 12];
   // DAC lookup tables.
-  static unsigned short model_dac[2][1 << 12];
+  static const DAC<12> model_dac[2];
 
 friend class Voice;
 friend class SID;

@@ -6,7 +6,7 @@ AR = @AR@
 
 noinst_LIBRARIES = libresid.a
 
-libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc dac.cc extfilt.cc pot.cc version.cc
+libresid_a_SOURCES = sid.cc voice.cc wave.cc envelope.cc filter.cc extfilt.cc pot.cc version.cc
 
 BUILT_SOURCES = $(noinst_DATA:.dat=.h)
 

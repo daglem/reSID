@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -20,9 +20,8 @@
 #define RESID_FILTER_CC
 
 #include "filter.h"
-#include "dac.h"
 #include "spline.h"
-#include <math.h>
+#include <cmath>
 
 namespace reSID
 {
@@ -349,7 +348,7 @@ Filter::Filter()
 
       // DAC table.
       int bits = 11;
-      build_dac_table(mf.f0_dac, bits, fi.dac_2R_div_R, fi.dac_term);
+      mf.f0_dac = DAC<11>(fi.dac_2R_div_R, fi.dac_term);
       for (int n = 0; n < (1 << bits); n++) {
 	mf.f0_dac[n] = (unsigned short)(N16*(fi.dac_zero + mf.f0_dac[n]*fi.dac_scale/(1 << bits) - vmin) + 0.5);
       }
@@ -359,9 +358,9 @@ Filter::Filter()
     delete[] opamp;
 
     // VCR - 6581 only.
-    model_filter_init_t& fi = model_filter_init[0];
+    model_filter_init_t& fi = model_filter_init[MOS6581];
 
-    double N16 = model_filter[0].vo_N16;
+    double N16 = model_filter[MOS6581].vo_N16;
     double vmin = N16*fi.opamp_voltage[0][0];
     double k = fi.k;
     double kVddt = N16*(k*(fi.Vdd - fi.Vth));

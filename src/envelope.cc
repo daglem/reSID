@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
 #define RESID_ENVELOPE_CC
 
 #include "envelope.h"
-#include "dac.h"
 
 namespace reSID
 {
@@ -28,7 +27,7 @@ namespace reSID
 // Rate counter periods are calculated from the Envelope Rates table in
 // the Programmer's Reference Guide. The rate counter period is the number of
 // cycles between each increment of the envelope counter.
-// The rates have been verified by sampling ENV3. 
+// The rates have been verified by sampling ENV3.
 //
 // The rate counter is a 16 bit register which is incremented each cycle.
 // When the counter reaches a specific comparison value, the envelope counter
@@ -146,10 +145,12 @@ reg8 EnvelopeGenerator::sustain_level[] = {
 };
 
 
-// DAC lookup tables.
-unsigned short EnvelopeGenerator::model_dac[2][1 << 8] = {
-  {0},
-  {0},
+// DAC lookup tables for 8-bit DACs.
+// MOS 6581: 2R/R ~ 2.20, missing termination resistor.
+// MOS 8580: 2R/R ~ 2.00, correct termination.
+RESID_CONSTINIT const DAC<8> EnvelopeGenerator::model_dac[2] = {
+  DAC<8>(2.20, false),
+  DAC<8>(2.00, true)
 };
 
 
@@ -158,18 +159,6 @@ unsigned short EnvelopeGenerator::model_dac[2][1 << 8] = {
 // ----------------------------------------------------------------------------
 EnvelopeGenerator::EnvelopeGenerator()
 {
-  static bool class_init;
-
-  if (!class_init) {
-    // Build DAC lookup tables for 8-bit DACs.
-    // MOS 6581: 2R/R ~ 2.20, missing termination resistor.
-    build_dac_table(model_dac[0], 8, 2.20, false);
-    // MOS 8580: 2R/R ~ 2.00, correct termination.
-    build_dac_table(model_dac[1], 8, 2.00, true);
-
-    class_init = true;
-  }
-
   set_chip_model(MOS6581);
 
   reset();

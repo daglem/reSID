@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 #define RESID_FILTER_H
 
 #include "siddefs.h"
+#include "dac.h"
 
 namespace reSID
 {
@@ -30,12 +31,6 @@ namespace reSID
 // which has been confirmed by Bob Yannes to be the actual circuit used in
 // the SID chip.
 //
-// Measurements show that excellent emulation of the SID filter is achieved,
-// except when high resonance is combined with high sustain levels.
-// In this case the SID op-amps are performing less than ideally and are
-// causing some peculiar behavior of the SID filter. This however seems to
-// have more effect on the overall amplitude than on the color of the sound.
-//
 // The theory for the filter circuit can be found in "Microelectric Circuits"
 // by Adel S. Sedra and Kenneth C. Smith.
 // The circuit is modeled based on the explanation found there except that
@@ -44,8 +39,8 @@ namespace reSID
 // filter outputs with levels independent of Q, which corresponds with the
 // results obtained from a real SID.
 //
-// We have been able to model the summer and the two integrators of the circuit
-// to form components of an IIR filter.
+// The summer and the two integrators of the circuit are modeled as components
+// of an IIR filter.
 // Vhp is the output of the summer, Vbp is the output of the first integrator,
 // and Vlp is the output of the second integrator in the filter circuit.
 //
@@ -84,7 +79,7 @@ namespace reSID
 //               |   |                     --8R1-- \--| D4           | (7.0R1)
 //               |   |                                |              |
 // $17           |   |                    (CAP2B)     |  (CAP1B)     |
-// 0=to mixer    |    --R8--    ---R8--        ---C---|       ---C---| 
+// 0=to mixer    |    --R8--    ---R8--        ---C---|       ---C---|
 // 1=to filter   |          |  |       |      |       |      |       |
 //                ------R8--|-----[A>--|--Rw-----[A>--|--Rw-----[A>--|
 //     ve (EXT IN)          |          |              |              |
@@ -440,7 +435,7 @@ protected:
     unsigned short gain[16][1 << 16];
     unsigned short mixer[mixer_offset<8>::value];
     // Cutoff frequency DAC output voltage table. FC is an 11 bit register.
-    unsigned short f0_dac[1 << 11];
+    DAC<11> f0_dac;
   } model_filter_t;
 
   int solve_gain(int* opamp, int n, int vi_t, int& x, model_filter_t& mf);
@@ -548,7 +543,7 @@ void Filter::clock(int voice1, int voice2, int voice3)
   }
 
   // Calculate filter outputs.
-  if (sid_model == 0) {
+  if (sid_model == MOS6581) {
     // MOS 6581.
     Vlp = solve_integrate_6581(1, Vbp, Vlp_x, Vlp_vc, f);
     Vbp = solve_integrate_6581(1, Vhp, Vbp_x, Vbp_vc, f);
@@ -663,7 +658,7 @@ void Filter::clock(cycle_count delta_t, int voice1, int voice2, int voice3)
   // is approximately 3.
   cycle_count delta_t_flt = 3;
 
-  if (sid_model == 0) {
+  if (sid_model == MOS6581) {
     // MOS 6581.
     while (delta_t) {
       if (unlikely(delta_t < delta_t_flt)) {
@@ -1271,7 +1266,7 @@ for my $mix (0..2**@i-1) {
   }
 
   // Sum the inputs in the mixer and run the mixer output through the gain.
-  if (sid_model == 0) {
+  if (sid_model == MOS6581) {
     return (short)(f.gain[vol][f.mixer[offset + Vi]] - (1 << 15));
   }
   else {

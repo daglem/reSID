@@ -1,6 +1,6 @@
 //  ---------------------------------------------------------------------------
 //  This file is part of reSID, a MOS6581 SID emulator engine.
-//  Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+//  Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
 #define RESID_WAVE_CC
 
 #include "wave.h"
-#include "dac.h"
 
 namespace reSID
 {
@@ -66,10 +65,12 @@ unsigned short WaveformGenerator::model_wave[2][8][1 << 12] = {
 };
 
 
-// DAC lookup tables.
-unsigned short WaveformGenerator::model_dac[2][1 << 12] = {
-  {0},
-  {0},
+// DAC lookup tables for 12-bit DACs.
+// MOS 6581: 2R/R ~ 2.20, missing termination resistor.
+// MOS 8580: 2R/R ~ 2.00, correct termination.
+RESID_CONSTINIT const DAC<12> WaveformGenerator::model_dac[2] = {
+  DAC<12>(2.20, false),
+  DAC<12>(2.00, true)
 };
 
 
@@ -96,12 +97,6 @@ WaveformGenerator::WaveformGenerator()
 
       accumulator += 0x1000;
     }
-
-    // Build DAC lookup tables for 12-bit DACs.
-    // MOS 6581: 2R/R ~ 2.20, missing termination resistor.
-    build_dac_table(model_dac[0], 12, 2.20, false);
-    // MOS 8580: 2R/R ~ 2.00, correct termination.
-    build_dac_table(model_dac[1], 12, 2.00, true);
 
     class_init = true;
   }

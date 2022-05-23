@@ -1,5 +1,5 @@
 dnl This file is part of reSID, a MOS6581 SID emulator engine.
-dnl Copyright (C) 2010  Dag Lem <resid@nimrod.no>
+dnl Copyright (C) 1998 - 2022  Dag Lem <resid@nimrod.no>
 dnl
 dnl Process this file with autoconf to produce a configure script.
 
@@ -114,6 +114,14 @@ AS_IF([test "$resid_cv_cxx_constexpr_cmath" = no],
    AS_IF([test "$resid_cv_cxx_consteval" = no],
      [AC_SUBST([RESID_CONSTEVAL], [constexpr])],
      [AC_SUBST([RESID_CONSTEVAL], [consteval])])])
+
+AC_CACHE_CHECK([for constinit], [resid_cv_cxx_constinit],
+  [AC_COMPILE_IFELSE([AC_LANG_SOURCE([[constinit int a = 10;]])],
+    [resid_cv_cxx_constinit=yes], [resid_cv_cxx_constinit=no])])
+
+AS_IF([test "$resid_cv_cxx_constinit" = no],
+  [AC_SUBST([RESID_CONSTINIT], [])],
+  [AC_SUBST([RESID_CONSTINIT], [constinit])])
 
 dnl Checks for library functions.
 
