@@ -415,9 +415,36 @@ RESID_INLINE void WaveformGenerator::set_noise_output()
 // * The combination of triangle and sawtooth interconnects neighboring bits
 //   of the sawtooth waveform.
 //
-// This behavior would be quite difficult to model exactly, since the short
-// circuits are not binary, but are subject to analog effects. Tests show that
-// minor (1 bit) differences can actually occur in the output from otherwise
+// The figure below show how the waveform bits are interconnected:
+//
+//   Pulse out   --Rpo--...-----------Rl---------------Rl--...
+//                            |                |
+//   Waveform bits         Nn |  Sn Sn-1  Nn-1 | Sn-1 Sn-2   N / P / S / T
+//                         |  |  |  |       |  |  |  |
+//   Switch "resistors"    Rn Rp Rs Rt      Rn Rp Rs Rt
+//                         |  |  |  |       |  |  |  |
+//   Waveform switches      \  \  \  \       \  \  \  \      Control reg D7-D4
+//                         |  |  |  |       |  |  |  |
+//                         ----------       ----------
+//                             |                |
+//   Waveform output bits /    Wn              Wn-1
+//   DAC input bits
+//
+// Notes:
+//   - Triangle output bit 0 is switched to GND via the "resistor" Rtlo.
+//     Rtlo has lower resistance than Rt.
+//   - The 8580 triangle output bits 11 - 4 are switched via "resistors" Rthi.
+//     Rthi have higher resistance than Rt.
+//   - Sawtooth output bit 11 is switched via the "resistor" Rshi.
+//     Rshi has higher resistance than Rs.
+//   - Rshi in the 8580 is different from Rshi in the 6581.
+//   - Noise output switch "resistors" Rn11 - Rn4 are all different.
+//   - Noise output bits 3 - 0 are switched to GND via the "resistors" Rnlo.
+//     Rnlo have lower resistance than Rn11 - Rn4.
+//
+// This would be computationally expensive to model exactly, since each output
+// bit value depends on all inputs, and the output bit values are analog. Tests
+// show that 1 bit differences can actually occur in the output from otherwise
 // identical samples from OSC3 when waveforms are combined. To further
 // complicate the situation the output changes slightly with time (more
 // neighboring bits are successively set) when the 12-bit waveform
