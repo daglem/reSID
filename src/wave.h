@@ -22,6 +22,9 @@
 
 #include "siddefs.h"
 #include "dac.h"
+#if RESID_FPGA_CODE
+#include <bitset>
+#endif
 
 namespace reSID
 {
@@ -58,6 +61,9 @@ public:
   short output();
 
   // Calculate and set waveform output value.
+#if RESID_FPGA_CODE
+  short calculate_waveform_output();
+#endif
   void set_waveform_output();
   void set_waveform_output(cycle_count delta_t);
 
@@ -417,17 +423,19 @@ RESID_INLINE void WaveformGenerator::set_noise_output()
 //
 // The figure below show how the waveform bits are interconnected:
 //
-//   Pulse out   --Rpo--...-----------Rl---------------Rl--...
+//   Pulse hi/lo  P--...--------------Rl---------------Rl--...
 //                            |                |
-//   Waveform bits         Nn |  Sn Sn-1  Nn-1 | Sn-1 Sn-2   N / P / S / T
+//   Sawtooth bits            | Sn+1           |  Sn
+//                   ...------|--|  -----------|--|  ------...
+//   Noise bits            Nn |  |  |     Nn-1 |  |  |
 //                         |  |  |  |       |  |  |  |
-//   Switch "resistors"    Rn Rp Rs Rt      Rn Rp Rs Rt
+//   Switch "resistors"    Rn Rp Rs Rt      Rn Rp Rs Rt     N / P / S / T
 //                         |  |  |  |       |  |  |  |
-//   Waveform switches      \  \  \  \       \  \  \  \      Control reg D7-D4
+//   Waveform switches      \  \  \  \       \  \  \  \     Control reg D7-D4
 //                         |  |  |  |       |  |  |  |
 //                         ----------       ----------
 //                             |                |
-//   Waveform output bits /    Wn              Wn-1
+//   Waveform output bits /   Wn+1              Wn
 //   DAC input bits
 //
 // Notes:
@@ -441,6 +449,10 @@ RESID_INLINE void WaveformGenerator::set_noise_output()
 //   - Noise output switch "resistors" Rn11 - Rn4 are all different.
 //   - Noise output bits 3 - 0 are switched to GND via the "resistors" Rnlo.
 //     Rnlo have lower resistance than Rn11 - Rn4.
+//   - The waveform bits are outputs from NMOS inverters. These have
+//     comparatively high output impedance, especially for "1" bits. This
+//     implies that *all* waveform output bits are in practice interconnected,
+//     not only for pulse, but also for the combination of triangle and sawtooth.
 //
 // This would be computationally expensive to model exactly, since each output
 // bit value depends on all inputs, and the output bit values are analog. Tests
@@ -450,7 +462,9 @@ RESID_INLINE void WaveformGenerator::set_noise_output()
 // neighboring bits are successively set) when the 12-bit waveform
 // registers are kept unchanged.
 //
-// The output is instead approximated by using the upper bits of the
+// It is possible to calculate (digital) bit values with reasonable resource
+// usage on an FPGA - this is demonstrated in calculate_waveform_output().
+// Here, the output is instead approximated by using the upper bits of the
 // accumulator as an index to look up the combined output in a table
 // containing actual combined waveform samples from OSC3.
 // These samples are 8 bit, so 4 bits of waveform resolution is lost.
@@ -487,6 +501,47 @@ static reg12 noise_pulse8580(reg12 noise)
     return (noise < 0xfc0) ? noise & (noise << 1) : 0xfc0;
 }
 
+#if RESID_FPGA_CODE
+RESID_INLINE
+short WaveformGenerator::calculate_waveform_output()
+{
+  int ix = (accumulator ^ (~sync_source->accumulator & ring_msb_mask)) >> 12;
+
+  switch (waveform) {
+  case 2:
+    return accumulator >> 12;
+  case 3: {
+    std::bitset<12> in = std::bitset<12>(accumulator);
+    std::bitset<12> out = std::bitset<12>();
+    if (sid_model == 0) {
+      out[0] = 0;
+      out[1] = 0;
+      out[2] = 0;
+      out[3] = in[1] & in[2] & in[3] & in[4] & in[5];  // Not measured
+      out[4] = in[3] & in[4] & in[5] & ((in[2] & ((in[6] & (in[1] | in[7])) | (in[0] & in[1] & (in[7] | in[8])))) | (in[1] & in[6] & in[7] & in[8] & in[9] & in[10]));
+      out[5] = in[3] & in[4] & in[5] & in[6] & ((in[7] & (in[2] | in[8])) | (in[1] & in[2]));
+      out[6] = in[4] & in[5] & in[6] & in[7] & ((in[8] & (in[3] | in[9])) | (in[2] & in[3]));
+      out[7] = in[5] & in[6] & in[7] & in[8] & ((in[9] & (in[4] | in[10])) | (in[3] & in[4]));
+      out[8] = in[6] & in[7] & in[8] & ((in[9] & ((in[10] & in[5]) | (in[4] & in[5]))) | (in[10] & in[0] & in[1] & in[2] & in[3] & in[4] & in[5]));
+      out[9] = in[5] & in[6] & in[7] & in[8] & in[9] & (in[10] | (in[1] & in[2] & in[3] & in[4]));
+      out[10] = in[2] & in[3] & in[4] & in[5] & in[6] & in[7] & in[8] & in[9] & in[10];
+      out[11] = 0;
+      return out.to_ulong();
+    }
+    else {
+      return wave[ix];
+    }
+  }
+  case 4:
+    return pulse_output;
+  case 8:
+    return no_noise_or_noise_output;
+  default:
+    return wave[ix] & (no_pulse | pulse_output) & no_noise_or_noise_output;
+  }
+}
+#endif // RESID_FPGA_CODE
+
 RESID_INLINE
 void WaveformGenerator::set_waveform_output()
 {
@@ -496,7 +551,11 @@ void WaveformGenerator::set_waveform_output()
     // calculation of the output value.
     int ix = (accumulator ^ (~sync_source->accumulator & ring_msb_mask)) >> 12;
 
+#if RESID_FPGA_CODE
+    waveform_output = calculate_waveform_output();
+#else
     waveform_output = wave[ix] & (no_pulse | pulse_output) & no_noise_or_noise_output;
+#endif
 
     if (unlikely((waveform & 0xc) == 0xc))
     {
