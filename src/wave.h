@@ -22,9 +22,6 @@
 
 #include "siddefs.h"
 #include "dac.h"
-#if RESID_FPGA_CODE
-#include <bitset>
-#endif
 
 namespace reSID
 {
@@ -506,34 +503,63 @@ RESID_INLINE
 short WaveformGenerator::calculate_waveform_output()
 {
   int ix = (accumulator ^ (~sync_source->accumulator & ring_msb_mask)) >> 12;
+  int x = accumulator;
 
+  // Espresso has been used to simplify sums of products per bit for
+  // sawtooth + triangle and pulse + sawtooth + triangle, based on waveform
+  // samples.
+  // A few manual simplifications have been made for the 8580 waveforms,
+  // without introducing any noticeable difference.
   switch (waveform) {
   case 2:
     return accumulator >> 12;
-  case 3: {
-    std::bitset<12> in = std::bitset<12>(accumulator);
-    std::bitset<12> out = std::bitset<12>();
+  case 3:
     if (sid_model == 0) {
-      out[0] = 0;
-      out[1] = 0;
-      out[2] = 0;
-      out[3] = in[1] & in[2] & in[3] & in[4] & in[5];  // Not measured
-      out[4] = in[3] & in[4] & in[5] & ((in[2] & ((in[6] & (in[1] | in[7])) | (in[0] & in[1] & (in[7] | in[8])))) | (in[1] & in[6] & in[7] & in[8] & in[9] & in[10]));
-      out[5] = in[3] & in[4] & in[5] & in[6] & ((in[7] & (in[2] | in[8])) | (in[1] & in[2]));
-      out[6] = in[4] & in[5] & in[6] & in[7] & ((in[8] & (in[3] | in[9])) | (in[2] & in[3]));
-      out[7] = in[5] & in[6] & in[7] & in[8] & ((in[9] & (in[4] | in[10])) | (in[3] & in[4]));
-      out[8] = in[6] & in[7] & in[8] & ((in[9] & ((in[10] & in[5]) | (in[4] & in[5]))) | (in[10] & in[0] & in[1] & in[2] & in[3] & in[4] & in[5]));
-      out[9] = in[5] & in[6] & in[7] & in[8] & in[9] & (in[10] | (in[1] & in[2] & in[3] & in[4]));
-      out[10] = in[2] & in[3] & in[4] & in[5] & in[6] & in[7] & in[8] & in[9] & in[10];
-      out[11] = 0;
-      return out.to_ulong();
+      return
+        ((((x & 0x7fc) == 0x7fc)) << 10) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0x3fe) == 0x3fe)) << 9) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0x5ff) == 0x5ff) | ((x & 0x3f0) == 0x3f0)) << 8) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0x1f8) == 0x1f8) | ((x & 0x3f0) == 0x3f0)) << 7) |
+        ((((x & 0x0fc) == 0x0fc) | ((x & 0x1f8) == 0x1f8) | ((x & 0x3f0) == 0x3f0)) << 6) |
+        ((((x & 0x07e) == 0x07e) | ((x & 0x1f8) == 0x1f8) | ((x & 0x0fc) == 0x0fc)) << 5) |
+        ((((x & 0x13f) == 0x13f) | ((x & 0x07e) == 0x07e) | ((x & 0x7fa) == 0x7fa) | ((x & 0x0bf) == 0x0bf) | ((x & 0x0fc) == 0x0fc)) << 4);
     }
     else {
-      return wave[ix];
+      return
+        ((((x & 0xe7e) == 0xe7e) | ((x & 0xe80) == 0xe80) | ((x & 0xf00) == 0xf00) | ((x & 0xe7d) == 0xe7d)) << 11) |
+        ((((x & 0x7f8) == 0x7f8) | ((x & 0xf00) == 0xf00)) << 10) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0xf0f) == 0xf0f) | ((x & 0xf1b) == 0xf1b) | ((x & 0xbfe) == 0xbfe) | ((x & 0xf1e) == 0xf1e) | ((x & 0xf40) == 0xf40) | ((x & 0xf30) == 0xf30) | ((x & 0xf29) == 0xf29) | ((x & 0xf26) == 0xf26) | ((x & 0xf80) == 0xf80)) << 9) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0x3f0) == 0x3f0) | ((x & 0xdfe) == 0xdfe) | ((x & 0x5ff) == 0x5ff) | ((x & 0xf80) == 0xf80)) << 8) |
+        ((((x & 0x7e0) == 0x7e0) | ((x & 0x3f0) == 0x3f0) | ((x & 0xfc0) == 0xfc0) | ((x & 0x1f8) == 0x1f8) | ((x & 0xeff) == 0xeff)) << 7) |
+        ((((x & 0x0fc) == 0x0fc) | ((x & 0x1f8) == 0x1f8) | ((x & 0x3f0) == 0x3f0) | ((x & 0xfe0) == 0xfe0)) << 6) |
+        ((((x & 0x07e) == 0x07e) | ((x & 0xff0) == 0xff0) | ((x & 0x7f7) == 0x7f7) | ((x & 0x1f8) == 0x1f8) | ((x & 0x0fc) == 0x0fc)) << 5) |
+        ((((x & 0xdbf) == 0xdbf) | ((x & 0x0fc) == 0x0fc) | ((x & 0x3fa) == 0x3fa) | ((x & 0x7f8) == 0x7f8) | ((x & 0x3bf) == 0x3bf) | ((x & 0x07e) == 0x07e)) << 4);
     }
-  }
   case 4:
     return pulse_output;
+  case 7: {
+    if (sid_model == 0) {
+      return
+        ((((x & 0x7fc) == 0x7fc) | ((x & 0x7fb) == 0x7fb)) << 10) |
+        ((((x & 0x7ef) == 0x7ef) | ((x & 0x7f7) == 0x7f7) | ((x & 0x7fc) == 0x7fc) | ((x & 0x7fb) == 0x7fb) | ((x & 0x3ff) == 0x3ff)) << 9) |
+        ((((x & 0x7fc) == 0x7fc) | ((x & 0x3ff) == 0x3ff) | ((x & 0x7f7) == 0x7f7) | ((x & 0x7fb) == 0x7fb)) << 8) |
+        ((((x & 0x7fc) == 0x7fc) | ((x & 0x3ff) == 0x3ff) | ((x & 0x7fb) == 0x7fb)) << 7) |
+        ((((x & 0x7fd) == 0x7fd) | ((x & 0x3ff) == 0x3ff) | ((x & 0x7fe) == 0x7fe)) << 6) |
+        ((((x & 0x7fd) == 0x7fd) | ((x & 0x3ff) == 0x3ff) | ((x & 0x7fe) == 0x7fe)) << 5) |
+        ((((x & 0x3ff) == 0x3ff) | ((x & 0x7fe) == 0x7fe)) << 4);
+    }
+    else {
+      return
+        ((((x & 0xe89) == 0xe89) | ((x & 0xe3e) == 0xe3e) | ((x & 0xec0) == 0xec0) | ((x & 0xe8a) == 0xe8a) | ((x & 0xdf7) == 0xdf7) | ((x & 0xdf8) == 0xdf8) | ((x & 0xe85) == 0xe85) | ((x & 0xe6a) == 0xe6a) | ((x & 0xe90) == 0xe90) | ((x & 0xe83) == 0xe83) | ((x & 0xe67) == 0xe67) | ((x & 0xea0) == 0xea0) | ((x & 0xf00) == 0xf00) | ((x & 0xe5e) == 0xe5e) | ((x & 0xe70) == 0xe70) | ((x & 0xe6c) == 0xe6c)) << 11) |
+        ((((x & 0xeee) == 0xeee) | ((x & 0x7ef) == 0x7ef) | ((x & 0x7f2) == 0x7f2) | ((x & 0x7f4) == 0x7f4) | ((x & 0xef0) == 0xef0) | ((x & 0x7f8) == 0x7f8) | ((x & 0xf00) == 0xf00) | ((x & 0x7f1) == 0x7f1)) << 10) |
+        ((((x & 0xf78) == 0xf78) | ((x & 0x7f0) == 0x7f0) | ((x & 0x7ee) == 0x7ee) | ((x & 0xf74) == 0xf74) | ((x & 0xf6f) == 0xf6f) | ((x & 0xf80) == 0xf80) | ((x & 0xbff) == 0xbff)) << 9) |
+        ((((x & 0xdff) == 0xdff) | ((x & 0xbfe) == 0xbfe) | ((x & 0x7ef) == 0x7ef) | ((x & 0x7f2) == 0x7f2) | ((x & 0x3ff) == 0x3ff) | ((x & 0x7f4) == 0x7f4) | ((x & 0xfc0) == 0xfc0) | ((x & 0xfb8) == 0xfb8) | ((x & 0x7f8) == 0x7f8) | ((x & 0xfb6) == 0xfb6)) << 8) |
+        ((((x & 0xbfe) == 0xbfe) | ((x & 0xfdc) == 0xfdc) | ((x & 0xdfe) == 0xdfe) | ((x & 0x7f7) == 0x7f7) | ((x & 0xfda) == 0xfda) | ((x & 0xbfd) == 0xbfd) | ((x & 0x7f8) == 0x7f8) | ((x & 0x3ff) == 0x3ff) | ((x & 0xfe0) == 0xfe0) | ((x & 0xeff) == 0xeff)) << 7) |
+        ((((x & 0xfeb) == 0xfeb) | ((x & 0x7fa) == 0x7fa) | ((x & 0xbfe) == 0xbfe) | ((x & 0xdfe) == 0xdfe) | ((x & 0xff0) == 0xff0) | ((x & 0x7fc) == 0x7fc) | ((x & 0x3ff) == 0x3ff) | ((x & 0xfec) == 0xfec) | ((x & 0xeff) == 0xeff)) << 6) |
+        ((((x & 0xff6) == 0xff6) | ((x & 0xdff) == 0xdff) | ((x & 0xf7f) == 0xf7f) | ((x & 0xbfe) == 0xbfe) | ((x & 0x7fc) == 0x7fc) | ((x & 0xff5) == 0xff5) | ((x & 0x3ff) == 0x3ff) | ((x & 0xff8) == 0xff8) | ((x & 0xeff) == 0xeff)) << 5) |
+        ((((x & 0xdff) == 0xdff) | ((x & 0xf7f) == 0xf7f) | ((x & 0xffa) == 0xffa) | ((x & 0x7fe) == 0x7fe) | ((x & 0xff9) == 0xff9) | ((x & 0xffc) == 0xffc) | ((x & 0x3ff) == 0x3ff) | ((x & 0xeff) == 0xeff)) << 4);
+    }
+  }
   case 8:
     return no_noise_or_noise_output;
   default:
